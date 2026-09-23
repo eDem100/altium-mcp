@@ -746,8 +746,13 @@ begin
                 AddJSONProperty(LayerProps, 'layer_name', LayerObject.Name);
                 AddJSONProperty(LayerProps, 'layer_id', Layer2String(LayerObject.LayerID));
                 AddJSONProperty(LayerProps, 'material_type', 'Copper');
+                // Altium's internal unit is 1/10000 mil, so /10000 gives mils and
+                // mils*25.4 gives micrometres. This used to divide by 254, which is
+                // mils*39.37: 1 oz copper (1.378 mil) was reported as 54um instead of
+                // 35um, and a 10.2 mil dielectric as 402um instead of 259um - wrong by
+                // a factor of 1.55, straight into any impedance or ampacity estimate.
                 AddJSONNumber(LayerProps, 'copper_thickness_mils', LayerObject.CopperThickness / 10000);
-                AddJSONNumber(LayerProps, 'copper_thickness_um', LayerObject.CopperThickness / 254);
+                AddJSONNumber(LayerProps, 'copper_thickness_um', (LayerObject.CopperThickness / 10000) * 25.4);
                 
                 // Add copper thickness to total
                 TotalThickness := TotalThickness + (LayerObject.CopperThickness / 10000);
@@ -765,7 +770,7 @@ begin
                     
                     AddJSONProperty(LayerProps, 'dielectric_material', LayerObject.Dielectric.DielectricMaterial);
                     AddJSONNumber(LayerProps, 'dielectric_height_mils', LayerObject.Dielectric.DielectricHeight / 10000);
-                    AddJSONNumber(LayerProps, 'dielectric_height_um', LayerObject.Dielectric.DielectricHeight / 254);
+                    AddJSONNumber(LayerProps, 'dielectric_height_um', (LayerObject.Dielectric.DielectricHeight / 10000) * 25.4);
                     AddJSONNumber(LayerProps, 'dielectric_constant', LayerObject.Dielectric.DielectricConstant);
                     
                     // Add dielectric thickness to total
