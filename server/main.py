@@ -58,8 +58,59 @@ EXCHANGE_DIR.mkdir(exist_ok=True)
 REQUEST_FILE = EXCHANGE_DIR / "request.json"
 RESPONSE_FILE = EXCHANGE_DIR / "response.json"
 
+# Heartbeat written by the in-Altium listener (McpListener.pas). Its freshness
+# is how this side tells "the listener is running" from "nobody is home", so a
+# tool call can fail immediately with an actionable message instead of waiting
+# out the full response timeout.
+LISTENER_FILE = EXCHANGE_DIR / "listener.json"
+LISTENER_STALE_SECONDS = 15
+
+START_LISTENER_HINT = (
+    "In Altium: File > Run Script..., expand Altium_API > McpListener.pas, "
+    "select StartMcpListener, click Run, and leave the listener window open "
+    "(its poll timer only ticks while the window is visible)."
+)
+
 # Initialize FastMCP server
 mcp = FastMCP("AltiumMCP", description="Altium integration through the Model Context Protocol")
+
+def _is_altium_running() -> bool:
+    """Check whether an Altium Designer main window is currently open.
+
+    Only used to word the error when the listener is not answering: "Altium
+    isn't running" and "Altium is running but you haven't started the listener"
+    need different fixes.
+    """
+    found = []
+
+    def _cb(hwnd, _):
+        if win32gui.IsWindowVisible(hwnd) and "Altium" in win32gui.GetWindowText(hwnd):
+            found.append(hwnd)
+        return True
+
+    win32gui.EnumWindows(_cb, 0)
+    return bool(found)
+
+
+def listener_is_live() -> bool:
+    """True when the in-Altium listener's heartbeat is fresh and says alive.
+
+    This is what selects the delivery path (see AltiumBridge.dispatch_request).
+    The user chooses by starting the listener or not; there is nothing to
+    configure.
+    """
+    try:
+        if time.time() - LISTENER_FILE.stat().st_mtime > LISTENER_STALE_SECONDS:
+            return False
+    except OSError:
+        return False
+
+    try:
+        return bool(json.loads(LISTENER_FILE.read_text()).get("alive", False))
+    except (OSError, ValueError):
+        # Fresh but unreadable means the listener is mid-write. The mtime is
+        # the authority; do not invent a fault from a torn read.
+        return True
 
 class AltiumConfig:
     def __init__(self):
@@ -274,21 +325,32 @@ class AltiumBridge:
             # Clean up any existing response file
             if RESPONSE_FILE.exists():
                 RESPONSE_FILE.unlink()
-            
-            # Write the request file with command and parameters
-            with open(REQUEST_FILE, "w") as f:
+
+            # Write the request atomically: the listener polls for this path
+            # several times a second and would otherwise read a partial file.
+            tmp_request = REQUEST_FILE.with_suffix(".json.tmp")
+            with open(tmp_request, "w") as f:
                 json.dump({
                     "command": command,
                     **params  # Include parameters directly in the main JSON object
                 }, f, indent=2)
-            
+            os.replace(tmp_request, REQUEST_FILE)
+
             logger.info(f"Wrote request file for command: {command}")
-            
-            # Run the Altium script
-            success = await self.run_altium_script()
-            if not success:
-                return {"success": False, "error": "Failed to run Altium script"}
-            
+
+            # The request must exist before this: on the command-line path the
+            # script reads it immediately, and on the listener path a tick can
+            # land at any moment.
+            dispatch_error = await self.dispatch_request()
+            if dispatch_error is not None:
+                # Do not leave an unserved request behind - a listener started
+                # later would execute it, long out of context.
+                try:
+                    REQUEST_FILE.unlink()
+                except OSError:
+                    pass
+                return {"success": False, "error": dispatch_error}
+
             # Wait for the response file
             logger.info(f"Waiting for response file to appear...")
             timeout = 120  # seconds
@@ -383,38 +445,62 @@ class AltiumBridge:
 
         return virtual_path
 
-    async def run_altium_script(self) -> bool:
-        """Run the Altium bridge script"""
+    async def dispatch_request(self) -> Optional[str]:
+        """Get the request file in front of Altium. None on success, else why not.
+
+        Two delivery paths, picked by whether the in-Altium listener is running:
+
+        - Listener live: it is already polling the exchange directory, so there
+          is nothing to launch. Costs no process and cannot take a license seat.
+        - Otherwise: hand the script to Altium on the command line, which is
+          what upstream does.
+
+        The command line only reaches an Altium the user started themselves when
+        this process is NOT inside the Claude MSIX container - measured
+        2026-09-22: from inside, it cold-starts a second instance with no project
+        that takes another license seat. That is why the server is meant to be
+        run as an ordinary process (see start-altium-mcp.cmd) rather than spawned
+        by the client over stdio.
+        """
+        if listener_is_live():
+            logger.info("Dispatch: in-Altium listener is live, it will pick the request up")
+            return None
+
         if not os.path.exists(self.config.altium_exe_path):
-            logger.error(f"Altium executable not found at: {self.config.altium_exe_path}")
-            print(f"Error: Altium executable not found. Please check the configuration.")
-            return False
+            error = f"Altium executable not found at: {self.config.altium_exe_path}"
+            logger.error(error)
+            return error
 
         if not os.path.exists(self.config.script_path):
-            logger.error(f"Script file not found at: {self.config.script_path}")
-            print(f"Error: Script file not found. Please check the configuration.")
-            return False
+            error = f"Script file not found at: {self.config.script_path}"
+            logger.error(error)
+            return error
+
+        if not _is_altium_running():
+            # Refuse rather than cold-start Altium: a fresh instance loads no
+            # project, so every command would fail, and it takes a license seat.
+            error = ("Altium Designer is not running. Open it with the target project, "
+                     "then retry - this server will not launch Altium. " + START_LISTENER_HINT)
+            logger.error(error)
+            return error
 
         try:
-            # Resolve MSIX-virtualized path so Altium (an external process
-            # outside the MSIX sandbox) can find the script files
+            # Resolve MSIX-virtualized paths so Altium, which lives outside any
+            # container, can find the script files.
             script_path = self._resolve_msix_path(self.config.script_path)
 
-            # Command format: "X2.EXE" -RScriptingSystem:RunScript(ProjectName="path\file.PrjScr"|ProcName="ModuleName>Run")
-            command = f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScript(ProjectName="{script_path}"^|ProcName="Altium_API>Run")'
-            
-            logger.info(f"Running command: {command}")
-            
-            # Start the process
-            process = subprocess.Popen(command, shell=True)
-            
-            # Don't wait for completion - Altium will run the script and generate the response
-            logger.info(f"Launched Altium with script, process ID: {process.pid}")
-            return True
-        
+            command = (f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScript('
+                       f'ProjectName="{script_path}"^|ProcName="Altium_API>Run")')
+            logger.info(f"Dispatch: running {command}")
+
+            # Not awaited: Altium runs the script and the response file is what
+            # signals completion.
+            subprocess.Popen(command, shell=True)
+            return None
         except Exception as e:
-            logger.error(f"Error launching Altium: {e}")
-            return False
+            error = f"Error dispatching to Altium: {e}"
+            logger.error(error)
+            return error
 
 # Create a global bridge instance
 altium_bridge = AltiumBridge()
@@ -1093,42 +1179,6 @@ SANDBOX_BEGIN = "// === BEGIN EXPERIMENT"
 SANDBOX_END = "// === END EXPERIMENT"
 
 
-def _dismiss_altium_dialogs():
-    """Close Altium modal popups that would otherwise block a script run.
-
-    Altium uses two kinds: Win32 task dialogs (#32770) and Delphi TMessageForm
-    error/warning boxes.
-    """
-    try:
-        import ctypes
-        from ctypes import wintypes
-    except ImportError:
-        return 0
-    user32 = ctypes.windll.user32
-    found = []
-
-    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-    def cb(hwnd, lparam):
-        if not user32.IsWindowVisible(hwnd):
-            return True
-        cls = ctypes.create_unicode_buffer(64)
-        user32.GetClassNameW(hwnd, cls, 64)
-        if cls.value == "#32770":
-            found.append(hwnd)
-        elif cls.value == "TMessageForm":
-            n = user32.GetWindowTextLengthW(hwnd)
-            buf = ctypes.create_unicode_buffer(n + 1)
-            user32.GetWindowTextW(hwnd, buf, n + 1)
-            if buf.value in ("Error", "Warning", "Information", "Confirm"):
-                found.append(hwnd)
-        return True
-
-    user32.EnumWindows(cb, 0)
-    for h in found:
-        user32.PostMessageW(h, 0x0010, 0, 0)
-    return len(found)
-
-
 @mcp.tool()
 async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 120) -> str:
     """
@@ -1175,9 +1225,29 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     """
     logger.info(f"run_altium_script: {len(script.splitlines())} lines")
 
+    # The sandbox runs in its own script project, which the in-Altium listener
+    # does not serve - it only polls for the production bridge's request file.
+    # So this tool is available on the command-line path only.
+    if listener_is_live():
+        return json.dumps({
+            "success": False,
+            "error": "run_altium_script is unavailable while the in-Altium listener is "
+                     "running: the sandbox is a separate script project that the listener "
+                     "does not poll for, and dispatching it would launch a second Altium. "
+                     "Stop the listener to use this tool, or run the snippet from Altium's "
+                     "own Script Editor.",
+        })
+
     if not SANDBOX_PAS.exists() or not SANDBOX_PRJ.exists():
         return json.dumps({"success": False,
                            "error": f"sandbox project missing at {SANDBOX_DIR}"})
+
+    if not _is_altium_running():
+        return json.dumps({
+            "success": False,
+            "error": "Altium Designer is not running. Open it with the target project first - "
+                     "this server will not launch Altium.",
+        })
 
     try:
         src = SANDBOX_PAS.read_text(encoding="utf-8")
@@ -1203,12 +1273,12 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
            f'ProjectName="{SANDBOX_PRJ}"^|ProcName="Sandbox>Run")')
     subprocess.Popen(cmd, shell=True)
 
+    # Altium's dialogs are deliberately NOT auto-dismissed here any more.
+    # Clicking them away blind hides the very failure this tool exists to
+    # report, and a dialog left standing is itself the diagnosis.
     start = time.time()
-    dialogs = 0
     while not SANDBOX_RESULT.exists() and time.time() - start < timeout_seconds:
         await asyncio.sleep(0.5)
-        if time.time() - start > 6:
-            dialogs += _dismiss_altium_dialogs()
 
     steps = []
     if SANDBOX_LOG.exists():
@@ -1216,21 +1286,19 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
 
     if SANDBOX_RESULT.exists():
         result_text = SANDBOX_RESULT.read_text(encoding="utf-8", errors="replace").strip()
-        return json.dumps({"success": True, "result": result_text, "steps": steps,
-                           "dialogs_dismissed": dialogs}, indent=2)
+        return json.dumps({"success": True, "result": result_text, "steps": steps}, indent=2)
 
     if steps:
         return json.dumps({
             "success": False,
             "error": "script started but did not finish",
             "last_step_reached": steps[-1],
-            "diagnosis": "The statement AFTER the last step is what crashed or paused the script.",
+            "diagnosis": "The statement AFTER the last step is what crashed or paused the script. "
+                         "A modal dialog standing in Altium will also hold it here.",
             "executor_wedged": True,
-            "recovery": "Altium's script executor is now blocked. Recover by running this "
-                        "shell command (sends the debugger Stop process to the running "
-                        "Altium): \"<altium_exe>\" -REditScript:Stop  -- then retry.",
-            "steps": steps,
-            "dialogs_dismissed": dialogs}, indent=2)
+            "recovery": "Altium's script executor may now be blocked. Dismiss any dialog in "
+                        "Altium, then press Ctrl+F3 there to stop a paused script.",
+            "steps": steps}, indent=2)
 
     return json.dumps({
         "success": False,
@@ -1238,10 +1306,9 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         "diagnosis": "Usually a COMPILE error in the script, or a previously paused "
                      "script blocking execution.",
         "executor_wedged": True,
-        "recovery": "A previously paused script may be blocking execution. Recover by "
-                    "running this shell command: \"<altium_exe>\" -REditScript:Stop  "
-                    "-- then retry. If it still fails, the script itself has a COMPILE error.",
-        "dialogs_dismissed": dialogs}, indent=2)
+        "recovery": "Dismiss any dialog in Altium and press Ctrl+F3 there to stop a paused "
+                    "script, then retry. If it still fails, the script has a COMPILE error."},
+        indent=2)
 
 
 @mcp.tool()
@@ -2588,14 +2655,26 @@ async def create_pcb_footprint(ctx: Context, footprint_name: str, description: s
 @mcp.tool()
 async def get_server_status(ctx: Context) -> str:
     """Get the current status of the Altium MCP server"""
+    listener = listener_is_live()
     status = {
         "server": "Running",
         "altium_exe": altium_bridge.config.altium_exe_path,
         "script_path": altium_bridge.config.script_path,
         "altium_found": os.path.exists(altium_bridge.config.altium_exe_path),
         "script_found": os.path.exists(altium_bridge.config.script_path),
+        "altium_running": _is_altium_running(),
+        # Which of the two delivery paths the next tool call will take. Worth
+        # reporting: they fail in different ways, so knowing which one is in
+        # use is the first thing you need when a call misbehaves.
+        "listener_live": listener,
+        "dispatch": "listener" if listener else "command-line",
     }
-    
+    if not listener:
+        status["dispatch_note"] = (
+            "Commands are handed to Altium on the command line. That only reaches your "
+            "running Altium if this server is an ordinary process; started from inside the "
+            "Claude app it would open a second instance instead. " + START_LISTENER_HINT)
+
     return json.dumps(status, indent=2)
 
 if __name__ == "__main__":
@@ -2616,6 +2695,22 @@ if __name__ == "__main__":
     # Print status
     print(f"Altium executable: {altium_bridge.config.altium_exe_path}")
     print(f"Script path: {altium_bridge.config.script_path}")
-    
-    # Run the server
-    mcp.run(transport='stdio')
+
+    # mcp 1.5.0 offers exactly two transports: stdio and sse. stdio stays the
+    # default so an existing stdio registration keeps working; sse is what the
+    # server uses when run as an ordinary process outside the Claude app.
+    transport = os.environ.get("ALTIUM_MCP_TRANSPORT", "stdio")
+    if "--transport" in sys.argv:
+        transport = sys.argv[sys.argv.index("--transport") + 1]
+
+    if transport == "sse":
+        # FastMCP's default host is 0.0.0.0 - every interface. These tools edit
+        # a real PCB and this version has no authentication and no Origin check,
+        # so loopback is the only isolation available and it is not optional.
+        # settings are read when run() starts, so assigning them here works.
+        mcp.settings.host = os.environ.get("ALTIUM_MCP_HOST", "127.0.0.1")
+        mcp.settings.port = int(os.environ.get("ALTIUM_MCP_PORT", "8765"))
+        mcp.settings.log_level = "INFO"  # otherwise uvicorn prints no startup banner
+        print(f"Serving MCP over SSE at http://{mcp.settings.host}:{mcp.settings.port}/sse")
+
+    mcp.run(transport=transport)

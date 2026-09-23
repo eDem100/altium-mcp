@@ -1326,7 +1326,9 @@ begin
     Project := GetWorkspace.DM_FocusedProject;
     If (Project = Nil) Then
     begin
-        ShowMessage('Error: No project is currently open');
+        // Reported through the response, not a modal dialog: a dialog here
+        // blocks Altium's UI thread and stalls the listener's poll timer.
+        Result := 'ERROR: No project is currently open';
         Exit;
     end;
 

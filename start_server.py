@@ -25,8 +25,21 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
 
+# The web stack is pinned, not just mcp. Only mcp was pinned before, so pip
+# resolved its transitive dependencies to current releases and the venv ended
+# up on starlette 1.6.0 against the 0.46.1 that mcp 1.5.0 was released with -
+# a major version apart. That went unnoticed while the server only spoke stdio,
+# because none of it was on the path; it matters now that the server also
+# serves SSE, which is starlette and uvicorn end to end. Versions below are
+# requirements.txt's, i.e. the set upstream exported and tested together.
+#
+# Changing this list changes the venv hash, so the next start builds a fresh
+# environment in a new directory. That is expected, not a fault.
 REQUIREMENTS = [
     "mcp[cli]==1.5.0",
+    "starlette==0.46.1",
+    "sse-starlette==2.2.1",
+    "uvicorn==0.34.0",
     "pillow>=11.1.0",
     "pywin32>=310",
 ]

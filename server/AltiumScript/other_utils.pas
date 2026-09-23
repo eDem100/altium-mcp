@@ -332,16 +332,9 @@ begin
     // TODO: Do I want to iterate through all workspace projects to find valid document if it is not current document?
     // Could use IWorkspace.DM_ProjectCount and for loop
 
-    // No matching document found or couldn't be focused
-    if not DocFound then
-    begin
-        ShowMessage('Error: No ' + DocumentKind + ' document found in the project.');
-    end
-    else
-    begin
-        ShowMessage('Error: Found ' + DocumentKind + ' document but could not focus it.');
-    end;
-    
+    // No matching document found or couldn't be focused. The caller turns this
+    // False into an error in the response; a modal dialog here would block
+    // Altium's UI thread and stall the listener's poll timer until dismissed.
     Result := False;
 end;
 

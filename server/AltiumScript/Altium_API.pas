@@ -75,8 +75,7 @@ begin
         end
         else
         begin
-            ShowMessage('Error: No designators found for get_component_pins');
-            Result := '';
+            Result := 'ERROR: No designators found for get_component_pins';
         end;
     finally
         DesignatorsList.Free;
@@ -286,8 +285,7 @@ begin
         end
         else
         begin
-            ShowMessage('Error: No component name provided');
-            Result := '';
+            Result := 'ERROR: No component name provided';
         end;
     finally
         PinsList.Free;
@@ -413,8 +411,7 @@ begin
         end
         else
         begin
-            ShowMessage('Error: No designator found for set_component_position');
-            Result := '';
+            Result := 'ERROR: No designator found for set_component_position';
         end;
     finally
     end;
@@ -491,8 +488,7 @@ begin
         end
         else
         begin
-            ShowMessage('Error: No designators found for move_components');
-            Result := '';
+            Result := 'ERROR: No designators found for move_components';
         end;
     finally
         DesignatorsList.Free;
@@ -819,8 +815,7 @@ begin
         end
         else
         begin
-            ShowMessage('Error: Source or destination lists are empty');
-            Result := '{"success": false, "error": "Source or destination lists are empty"}';
+            Result := 'ERROR: Source or destination lists are empty';
         end;
     finally
         SourceList.Free;
@@ -894,8 +889,7 @@ begin
         end
         else
         begin
-            ShowMessage('Error: No container names specified');
-            Result := '{"success": false, "error": "No container names specified"}';
+            Result := 'ERROR: No container names specified';
         end;
     finally
         ContainersList.Free;
@@ -1038,7 +1032,15 @@ begin
         end;
     end;
 
-    EnsureDocumentFocused(CommandName, ViewHint);
+    // A failed focus used to be ignored here, so a command then ran against no
+    // document and returned an empty result that looked like a successful
+    // "nothing found". Report it instead of answering plausibly but wrongly.
+    if not EnsureDocumentFocused(CommandName, ViewHint) then
+    begin
+        Result := 'ERROR: Could not focus a document of the kind ' + CommandName +
+                  ' needs. Open the required document in the focused project first.';
+        Exit;
+    end;
 
     // Direct command execution based on the command name
     case CommandName of
@@ -1102,7 +1104,7 @@ begin
         'create_pcb_footprint':
             Result := ExecuteCreatePCBFootprint(RequestData);
     else
-        ShowMessage('Error: Unknown command: ' + CommandName);
+        Result := 'ERROR: Unknown command: ' + CommandName;
     end;
 end;
 
@@ -1178,33 +1180,44 @@ begin
             AddJSONProperty(ResultProps, 'error', ActualErrorMsg);
         end;
         
-        // Build response
+        // Build response. Write to a temp file and rename it into place, so a
+        // poller watching RESPONSE_FILE can never read a half-written file.
         ResponseData.Text := BuildJSONObject(ResultProps);
-        ResponseData.SaveToFile(RESPONSE_FILE);
+        ResponseData.SaveToFile(RESPONSE_FILE + '.tmp');
+        if FileExists(RESPONSE_FILE) then
+            DeleteFile(RESPONSE_FILE);
+        RenameFile(RESPONSE_FILE + '.tmp', RESPONSE_FILE);
     finally
         ResultProps.Free;
         ResponseData.Free;
     end;
 end;
 
-// Main procedure to run the bridge
-procedure Run;
+// Handle one pending request, if there is one. Returns True when a request was
+// consumed. Shared by the one-shot Run entry point and the persistent listener
+// in McpListener.pas.
+//
+// Reports every failure through the response file rather than a modal dialog:
+// a dialog raised here blocks Altium's UI thread, which stalls the listener's
+// poll timer until somebody clicks OK, and the caller waiting on the response
+// just sees a timeout with no reason.
+function ProcessPendingRequest: Boolean;
 var
     CommandType: String;
-    Result: String;
+    CmdResult: String;
     i: Integer;
     Line: String;
     ValueStart: Integer;
 begin
+    Result := False;
+
     // Initialize file paths based on script location
     InitializeFilePaths();
 
-    // Check if request file exists
     if not FileExists(REQUEST_FILE) then
-    begin
-        ShowMessage('Error: No request file found at ' + REQUEST_FILE);
         Exit;
-    end;
+
+    Result := True;
 
     try
         // Initialize parameters list
@@ -1241,22 +1254,20 @@ begin
             // Execute the command if valid
             if CommandType <> '' then
             begin
-                Result := ExecuteCommand(CommandType);
+                CmdResult := ExecuteCommand(CommandType);
 
-                if Result <> '' then
+                if CmdResult <> '' then
                 begin
-                    WriteResponse(True, Result, '');
+                    WriteResponse(True, CmdResult, '');
                 end
                 else
                 begin
                     WriteResponse(False, '', 'Command execution failed');
-                    ShowMessage('Error: Command execution failed');
                 end;
             end
             else
             begin
                 WriteResponse(False, '', 'No command specified');
-                ShowMessage('Error: No command specified');
             end;
         finally
             RequestData.Free;
@@ -1265,8 +1276,27 @@ begin
     except
         // Simple exception handling without the specific exception type
         WriteResponse(False, '', 'Exception occurred during script execution');
-        ShowMessage('Error: Exception occurred during script execution');
     end;
+
+    // Consume the request so a polling listener does not run it again. Done
+    // last, and outside the parse/execute try, so a request is still cleared
+    // when its command raised - otherwise the listener would replay the same
+    // failing request on every tick.
+    if FileExists(REQUEST_FILE) then
+        DeleteFile(REQUEST_FILE);
+end;
+
+
+// One-shot entry point, kept for the legacy command-line dispatch
+// ("X2.EXE -RScriptingSystem:RunScript(...|ProcName=Altium_API>Run)").
+// The supported path is now the persistent listener in McpListener.pas:
+// on this machine the command line starts a SECOND Altium instance instead of
+// attaching to the running one, which takes another license seat and has no
+// project loaded. See CLAUDE.md in the repository root.
+procedure Run;
+begin
+    if not ProcessPendingRequest then
+        ShowMessage('Error: No request file found at ' + REQUEST_FILE);
 end;
 
 
