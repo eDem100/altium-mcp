@@ -1,0 +1,24 @@
+[mcp_servers.altium_community_read]
+command = 'C:\AltiumBridge\.venv\Scripts\python.exe'
+args = ['-B', 'C:\AltiumBridge\profiles\scoped-review\server\main.py']
+enabled_tools = [
+  'bridge_get_capabilities',
+  'bridge_get_messages',
+  'bridge_capture_snapshot',
+  'bridge_read_dataset',
+  'bridge_measure_geometry',
+  'bridge_get_manufacturing_data',
+  'bridge_create_working_copy',
+  'bridge_prepare_change_set',
+  'bridge_apply_change_set',
+  'bridge_run_analysis_job',
+  'get_schematic_data',
+  'get_pcb_layers',
+  'get_component_data',
+  'get_all_designators',
+  'get_component_pins',
+  'get_all_nets',
+  'get_pcb_rules',
+  'get_server_status',
+  'get_read_context',
+]

@@ -1,0 +1,11 @@
+server/pilot_policy.json
+.codex/
+.local/
+outputs/
+__pycache__/
+*.PcbDoc
+*.SchDoc
+*.BomDoc
+*.xlsx
+*.csv
+!server/pilot_policy.example.json
