@@ -458,11 +458,13 @@ class AltiumBridge:
         Do not count on the command line reaching an Altium the user started
         themselves. Measured 2026-09-22 and 2026-09-23 on the machine this fork
         is developed on: it cold-started a second instance with no project that
-        took another license seat - both from a server spawned by the Claude app
-        AND from one on python.org Python started from Explorer. The identical
-        command typed into the user's own PowerShell attached. Why the two
-        differ is unresolved (the MSIX-packaging explanation was disproven), so
-        the listener is the path to use and this one is only a fallback.
+        took another license seat - from a server spawned by the Claude app, and
+        from servers started from Explorer on both a Microsoft Store and a
+        python.org venv. Yet a one-shot script on the python.org base
+        interpreter, sending this same command string the same way, attached.
+        Why the two differ is unresolved (the MSIX-packaging explanation was
+        disproven), so the listener is the path to use and this one is only a
+        fallback.
         """
         if listener_is_live():
             logger.info("Dispatch: in-Altium listener is live, it will pick the request up")
