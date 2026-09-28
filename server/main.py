@@ -455,12 +455,14 @@ class AltiumBridge:
         - Otherwise: hand the script to Altium on the command line, which is
           what upstream does.
 
-        The command line only reaches an Altium the user started themselves when
-        this process is NOT inside the Claude MSIX container - measured
-        2026-09-22: from inside, it cold-starts a second instance with no project
-        that takes another license seat. That is why the server is meant to be
-        run as an ordinary process (see start-altium-mcp.cmd) rather than spawned
-        by the client over stdio.
+        Do not count on the command line reaching an Altium the user started
+        themselves. Measured 2026-09-22 and 2026-09-23 on the machine this fork
+        is developed on: it cold-started a second instance with no project that
+        took another license seat - both from a server spawned by the Claude app
+        AND from one on python.org Python started from Explorer. The identical
+        command typed into the user's own PowerShell attached. Why the two
+        differ is unresolved (the MSIX-packaging explanation was disproven), so
+        the listener is the path to use and this one is only a fallback.
         """
         if listener_is_live():
             logger.info("Dispatch: in-Altium listener is live, it will pick the request up")
@@ -2671,9 +2673,12 @@ async def get_server_status(ctx: Context) -> str:
     }
     if not listener:
         status["dispatch_note"] = (
-            "Commands are handed to Altium on the command line. That only reaches your "
-            "running Altium if this server is an ordinary process; started from inside the "
-            "Claude app it would open a second instance instead. " + START_LISTENER_HINT)
+            "The listener is not running, so commands will be handed to Altium on the "
+            "command line. That can open a SECOND Altium instead of reaching the one you "
+            "have open - with no project loaded and taking another license seat. It did so "
+            "on the machine this fork is developed on, even with this server running as an "
+            "ordinary process, and why is not understood. Start the listener before calling "
+            "any tool: " + START_LISTENER_HINT)
 
     return json.dumps(status, indent=2)
 
