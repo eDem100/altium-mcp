@@ -20,6 +20,7 @@ import io
 import base64
 import glob
 import re
+import schematic_spec
 
 # Configure logging
 logging.basicConfig(
@@ -1463,7 +1464,11 @@ async def create_footprints_batch(ctx: Context, spec_file: str) -> str:
 @mcp.tool()
 async def build_schematic(ctx: Context, parts: list, wires: list = None,
                           junctions: list = None, net_labels: list = None,
-                          power_ports: list = None, notes: list = None) -> str:
+                          power_ports: list = None, notes: list = None,
+                          template_from_sheet: str = None,
+                          sheet_parameters: dict = None,
+                          text_frames: list = None, save_as: str = None,
+                          add_to_project: str = None) -> str:
     """
     Build a wired schematic on a NEW sheet from a circuit description.
 
@@ -1501,6 +1506,25 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
             "show_net_name":false}]. Harvest style/orientation from an existing
             sheet rather than guessing: 5 = digital ground, 2 = supply bar.
         notes: [{"x":..,"y":..,"text":".."}] free text.
+        template_from_sheet: absolute path of an existing .SchDoc whose sheet
+            template (border, title block, sheet size) is copied onto the new
+            sheet. That sheet must be open in Altium or openable; it is only
+            read. Title-block fields then resolve from sheet_parameters and,
+            once the sheet is in a project, from the project.
+        sheet_parameters: {name: value} document parameters, e.g.
+            {"Revision": "A", "Author": "..", "SheetNumber": "3"}. Existing
+            system parameters are updated in place, others are added.
+        text_frames: Altium Text Frames - [{"x1":..,"y1":..,"x2":..,"y2":..,
+            "text": "line 1\\nline 2", "font": "Arial", "size": 10,
+            "bold": false, "align": "left"|"center"|"right", "border": true,
+            "fill": "#RRGGBB" or null}]. (x1,y1) is bottom-left, (x2,y2)
+            top-right, in mils. Text wraps inside the frame. Abutting framed
+            cells draw a table.
+        save_as: absolute .SchDoc path to save the new sheet to. Refuses to
+            overwrite an existing file.
+        add_to_project: absolute .PrjPcb path of a project open in Altium;
+            the saved sheet is added to it (requires save_as). The project
+            file itself is left unsaved.
 
     Returns:
         JSON with the created sheet name, counts, and the pin map - every
@@ -1508,42 +1532,15 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
     """
     logger.info(f"Building schematic: {len(parts)} parts")
 
-    lines = []
-    for p in parts:
-        for key in ("designator", "symbol_library", "symbol", "x", "y"):
-            if key not in p:
-                return json.dumps({"success": False,
-                                   "error": f"part missing required key '{key}': {p}"})
-        lines.append("PART|{}|{}|{}|{}|{}|{}|{}|{}".format(
-            p["designator"], p["symbol_library"], p["symbol"],
-            p.get("design_item_id", ""), int(p["x"]), int(p["y"]),
-            int(p.get("orientation", 0)), 1 if p.get("mirror") else 0))
-        if p.get("comment"):
-            lines.append(f"COMMENT|{p['comment']}")
-        if p.get("footprint"):
-            lines.append(f"FOOTPRINT|{p['footprint']}")
-        if p.get("description"):
-            lines.append(f"DESCRIPTION|{p['description']}")
-        for name, val in (p.get("parameters") or {}).items():
-            lines.append(f"PARAM|{name}|{val}")
-
-    for route in (wires or []):
-        if len(route) < 4 or len(route) % 2:
-            return json.dumps({"success": False,
-                               "error": f"wire needs an even count of >=4 coords: {route}"})
-        lines.append("WIRE|" + "|".join(str(int(v)) for v in route))
-    for j in (junctions or []):
-        lines.append(f"JUNCTION|{int(j['x'])}|{int(j['y'])}")
-    for n in (net_labels or []):
-        lines.append("NETLABEL|{}|{}|{}|{}".format(
-            int(n["x"]), int(n["y"]), int(n.get("orientation", 0)), n["text"]))
-    for pw in (power_ports or []):
-        lines.append("POWER|{}|{}|{}|{}|{}|{}".format(
-            int(pw["x"]), int(pw["y"]), int(pw.get("orientation", 3)),
-            int(pw.get("style", 5)), pw["text"],
-            1 if pw.get("show_net_name") else 0))
-    for nt in (notes or []):
-        lines.append(f"NOTE|{int(nt['x'])}|{int(nt['y'])}|{nt['text']}")
+    try:
+        lines = schematic_spec.build_spec_lines(
+            parts, wires=wires, junctions=junctions, net_labels=net_labels,
+            power_ports=power_ports, notes=notes,
+            template_from_sheet=template_from_sheet,
+            sheet_parameters=sheet_parameters, text_frames=text_frames,
+            save_as=save_as, add_to_project=add_to_project)
+    except schematic_spec.SpecError as e:
+        return json.dumps({"success": False, "error": str(e)})
 
     spec_path = Path("C:/Users/Public/altium_mcp/circuit_spec.txt")
     spec_path.parent.mkdir(parents=True, exist_ok=True)

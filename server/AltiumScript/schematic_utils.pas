@@ -1644,6 +1644,45 @@ begin
     end;
 end;
 
+// TRAP: on AD26.11.1 ISch_Component.Replicate copies only the component
+// header with its designator and comment; the pins and body graphics stay
+// behind. Measured 2026-11-17 on a 4-pin library part: 7 children in the
+// library, 2 in the replica, and the placed part drew as a bare designator.
+// Copy every child whose kind the replica did not receive, so the copy is
+// complete whichever subset a given Altium build replicates. Call before the
+// replica is registered or transformed, so the children share its frame.
+function CopyMissingChildren(Src, Dst : ISch_Component) : Integer;
+var
+    It : ISch_Iterator;
+    Ch, Dup : ISch_GraphicalObject;
+    Have : String;
+begin
+    Result := 0;
+    Have := ',';
+    It := Dst.SchIterator_Create;
+    Ch := It.FirstSchObject;
+    while (Ch <> nil) do
+    begin
+        Have := Have + IntToStr(Ch.ObjectId) + ',';
+        Ch := It.NextSchObject;
+    end;
+    Dst.SchIterator_Destroy(It);
+
+    It := Src.SchIterator_Create;
+    Ch := It.FirstSchObject;
+    while (Ch <> nil) do
+    begin
+        if (Pos(',' + IntToStr(Ch.ObjectId) + ',', Have) = 0) then
+        begin
+            Dup := Ch.Replicate;
+            Dst.AddSchObject(Dup);
+            Result := Result + 1;
+        end;
+        Ch := It.NextSchObject;
+    end;
+    Src.SchIterator_Destroy(It);
+end;
+
 function BuildCircuitFromSpec(SpecPath: String; PlacementPath: String): String;
 var
     Spec, Placement, PinMap : TStringList;
@@ -1657,6 +1696,15 @@ var
     i, fld, vtx, PartCount, GfxCount, PinCount : Integer;
     HotX, HotY : Integer;
     Exists : Boolean;
+    // Sheet-level records: TEMPLATEFROM, DOCPARAM, TEXTFRAME, SAVEAS, PROJECT
+    SrcDoc : ISch_Document;
+    TplSrc, TplCopy, Kid, Owner : ISch_GraphicalObject;
+    KidIter : ISch_Iterator;
+    TargetProj, ScanProj : IProject;
+    SrvDoc : IServerDocument;
+    TplPath, SaveAs, SaveKind, PrjPath, Extra : String;
+    FrameCount, DocParamCount, TplSrcKids, TplDstKids, FillColor : Integer;
+    InProject, SaveOk : Boolean;
 begin
     Result := '{"success": false, "error": "build did not run"}';
 
@@ -1670,6 +1718,109 @@ begin
     Spec.LoadFromFile(SpecPath);
     Placement := TStringList.Create;
     if FileExists(PlacementPath) then Placement.LoadFromFile(PlacementPath);
+
+    // Sheet-level records act on the sheet as a whole, so collect them before
+    // anything is created. Each failure below aborts BEFORE a sheet exists.
+    TplPath := '';
+    SaveAs := '';
+    SaveKind := '';
+    PrjPath := '';
+    for i := 0 to Spec.Count - 1 do
+    begin
+        Kind := GetFieldFromPipeString(Spec[i], 0);
+        if (Kind = 'TEMPLATEFROM') then TplPath := GetFieldFromPipeString(Spec[i], 1)
+        else if (Kind = 'SAVEAS') then
+        begin
+            SaveAs := GetFieldFromPipeString(Spec[i], 1);
+            SaveKind := GetFieldFromPipeString(Spec[i], 2);
+        end
+        else if (Kind = 'PROJECT') then PrjPath := GetFieldFromPipeString(Spec[i], 1);
+    end;
+
+    if (SaveAs <> '') then
+        if FileExists(SaveAs) or (SaveKind = '') then
+        begin
+            Spec.Free;
+            Placement.Free;
+            Result := '{"success": false, "error": "save_as exists (refusing to overwrite) or has no save format: ' +
+                      JSONEscapeString(SaveAs) + '"}';
+            Exit;
+        end;
+
+    TargetProj := nil;
+    if (PrjPath <> '') then
+    begin
+        for i := 0 to GetWorkspace.DM_ProjectCount - 1 do
+        begin
+            ScanProj := GetWorkspace.DM_Projects(i);
+            if (UpperCase(ScanProj.DM_ProjectFullPath) = UpperCase(PrjPath)) then
+                TargetProj := ScanProj;
+        end;
+        if (TargetProj = nil) or (SaveAs = '') then
+        begin
+            Spec.Free;
+            Placement.Free;
+            Result := '{"success": false, "error": "add_to_project: project not open in Altium, or no save_as: ' +
+                      JSONEscapeString(PrjPath) + '"}';
+            Exit;
+        end;
+    end;
+
+    // TEMPLATEFROM: the frame, title block and sheet size come from a sheet that
+    // already carries the template, so the copy is exactly what Altium itself
+    // made when that template was applied (same eTemplate object, same
+    // TemplateFileName). The source sheet is only read. Resolve it before the
+    // target exists: opening it changes the current document.
+    SrcDoc := nil;
+    TplSrc := nil;
+    TplSrcKids := 0;
+    TplDstKids := 0;
+    if (TplPath <> '') then
+    begin
+        SrcDoc := SchServer.GetSchDocumentByPath(TplPath);
+        if (SrcDoc = nil) then
+        begin
+            // A project sheet that is not open in the editor has no
+            // ISch_Document yet (dev/verify_pin_convention.pas).
+            SrvDoc := Client.OpenDocument('SCH', TplPath);
+            if (SrvDoc <> nil) then Client.ShowDocument(SrvDoc);
+            Sleep(1000);
+            SrcDoc := SchServer.GetSchDocumentByPath(TplPath);
+        end;
+        if (SrcDoc <> nil) then
+        begin
+            Iter := SrcDoc.SchIterator_Create;
+            Prim := Iter.FirstSchObject;
+            while (Prim <> nil) do
+            begin
+                // 42 = eTemplate, 32 = owned by the sheet (dev/SHEET_DUPLICATION.md)
+                if (Prim.ObjectId = 42) and (TplSrc = nil) then
+                begin
+                    Owner := Prim.Container;
+                    if (Owner <> nil) then
+                        if (Owner.ObjectId = 32) then TplSrc := Prim;
+                end;
+                Prim := Iter.NextSchObject;
+            end;
+            SrcDoc.SchIterator_Destroy(Iter);
+        end;
+        if (TplSrc = nil) then
+        begin
+            Spec.Free;
+            Placement.Free;
+            Result := '{"success": false, "error": "template_from_sheet: sheet not available or carries no template: ' +
+                      JSONEscapeString(TplPath) + '"}';
+            Exit;
+        end;
+        KidIter := TplSrc.SchIterator_Create;
+        Kid := KidIter.FirstSchObject;
+        while (Kid <> nil) do
+        begin
+            TplSrcKids := TplSrcKids + 1;
+            Kid := KidIter.NextSchObject;
+        end;
+        TplSrc.SchIterator_Destroy(KidIter);
+    end;
 
     // SAFETY: opening a symbol library makes THAT document current. Stray
     // components were once registered into shared libraries on a read-only
@@ -1711,6 +1862,61 @@ begin
     CurLib := '';
     PartCount := 0;
     GfxCount := 0;
+    FrameCount := 0;
+    DocParamCount := 0;
+
+    // Sheet geometry before any object is registered, or content lands against
+    // the wrong page size (dev/SHEET_DUPLICATION.md). Grids are left at the new
+    // sheet's defaults: the spec coordinates assume them.
+    if (TplSrc <> nil) then
+    begin
+        TargetDoc.SheetStyle           := SrcDoc.SheetStyle;
+        TargetDoc.UseCustomSheet       := SrcDoc.UseCustomSheet;
+        TargetDoc.CustomX              := SrcDoc.CustomX;
+        TargetDoc.CustomY              := SrcDoc.CustomY;
+        TargetDoc.CustomXZones         := SrcDoc.CustomXZones;
+        TargetDoc.CustomYZones         := SrcDoc.CustomYZones;
+        TargetDoc.CustomMarginWidth    := SrcDoc.CustomMarginWidth;
+        TargetDoc.SheetMarginWidth     := SrcDoc.SheetMarginWidth;
+        TargetDoc.SheetZonesX          := SrcDoc.SheetZonesX;
+        TargetDoc.SheetZonesY          := SrcDoc.SheetZonesY;
+        TargetDoc.WorkspaceOrientation := SrcDoc.WorkspaceOrientation;
+        TargetDoc.BorderOn             := SrcDoc.BorderOn;
+        TargetDoc.TitleBlockOn         := SrcDoc.TitleBlockOn;
+        TargetDoc.ReferenceZonesOn     := SrcDoc.ReferenceZonesOn;
+        TargetDoc.ShowTemplateGraphics := SrcDoc.ShowTemplateGraphics;
+        TargetDoc.TemplateFileName     := SrcDoc.TemplateFileName;
+        TargetDoc.SetState_xSizeySize;
+
+        // Replicate is shallow on AD26.11.1 for components; the template's
+        // border and title-block primitives are its children too, so complete
+        // the copy the same way and then COUNT, rather than trust it.
+        TplCopy := TplSrc.Replicate;
+        CopyMissingChildren(TplSrc, TplCopy);
+        TargetDoc.RegisterSchObjectInContainer(TplCopy);
+        SchServer.RobotManager.SendMessage(TargetDoc.I_ObjectAddress, c_BroadCast,
+            SCHM_PrimitiveRegistration, TplCopy.I_ObjectAddress);
+        KidIter := TplCopy.SchIterator_Create;
+        Kid := KidIter.FirstSchObject;
+        while (Kid <> nil) do
+        begin
+            TplDstKids := TplDstKids + 1;
+            Kid := KidIter.NextSchObject;
+        end;
+        TplCopy.SchIterator_Destroy(KidIter);
+
+        if (TplDstKids <> TplSrcKids) then
+        begin
+            SchServer.ProcessControl.PostProcess(TargetDoc, '');
+            TargetDoc.GraphicallyInvalidate;
+            Spec.Free;
+            Placement.Free;
+            Result := '{"success": false, "error": "template copy incomplete: source has ' +
+                      IntToStr(TplSrcKids) + ' primitives, copy has ' + IntToStr(TplDstKids) +
+                      '", "sheet": "' + JSONEscapeString(TargetDoc.DocumentName) + '"}';
+            Exit;
+        end;
+    end;
 
     for i := 0 to Spec.Count - 1 do
     begin
@@ -1743,6 +1949,7 @@ begin
             else
             begin
                 Replica := Found.Replicate;
+                CopyMissingChildren(Found, Replica);
                 Replica.Designator.Text := GetFieldFromPipeString(Rec, 1);
                 Replica.DesignItemID    := GetFieldFromPipeString(Rec, 4);
                 Replica.Orientation     := StrToInt(GetFieldFromPipeString(Rec, 7));
@@ -1915,7 +2122,70 @@ begin
             SchServer.RobotManager.SendMessage(TargetDoc.I_ObjectAddress, c_BroadCast,
                 SCHM_PrimitiveRegistration, Obj.I_ObjectAddress);
             GfxCount := GfxCount + 1;
+        end
+
+        else if (Kind = 'DOCPARAM') then
+        begin
+            // DOCPARAM|name|value. A new sheet already has ~27 system
+            // parameters that cannot be removed; update by name, add otherwise.
+            PName := GetFieldFromPipeString(Rec, 1);
+            PVal  := GetFieldFromPipeString(Rec, 2);
+            Param := TargetDoc.GetState_SchParameterByName(PName);
+            if (Param <> nil) then
+                Param.Text := PVal
+            else
+            begin
+                Param := SchServer.SchObjectFactory(eParameter, eCreate_GlobalCopy);
+                Param.Name := PName;
+                Param.Text := PVal;
+                Param.IsHidden := True;
+                TargetDoc.RegisterSchObjectInContainer(Param);
+                SchServer.RobotManager.SendMessage(TargetDoc.I_ObjectAddress, c_BroadCast,
+                    SCHM_PrimitiveRegistration, Param.I_ObjectAddress);
+            end;
+            DocParamCount := DocParamCount + 1;
+        end
+
+        else if (Kind = 'TEXTFRAME') then
+        begin
+            // TEXTFRAME|x1|y1|x2|y2|font|size|bold|align|border|fill|text
+            // (x1,y1) bottom-left, (x2,y2) top-right, mils. fill -1 = none,
+            // else a TColor (BGR). <NL> in the text is a line break.
+            Obj := SchServer.SchObjectFactory(eTextFrame, eCreate_GlobalCopy);
+            Obj.Location := Point(MilsToCoord(StrToInt(GetFieldFromPipeString(Rec, 1))),
+                                  MilsToCoord(StrToInt(GetFieldFromPipeString(Rec, 2))));
+            Obj.Corner := Point(MilsToCoord(StrToInt(GetFieldFromPipeString(Rec, 3))),
+                                MilsToCoord(StrToInt(GetFieldFromPipeString(Rec, 4))));
+            Obj.FontId := SchServer.FontManager.GetFontID(
+                StrToInt(GetFieldFromPipeString(Rec, 6)), 0, False, False,
+                (GetFieldFromPipeString(Rec, 7) = '1'), False, GetFieldFromPipeString(Rec, 5));
+            if (GetFieldFromPipeString(Rec, 8) = 'C') then
+                Obj.Alignment := eHorizontalCentreAlign
+            else if (GetFieldFromPipeString(Rec, 8) = 'R') then
+                Obj.Alignment := eRightAlign
+            else
+                Obj.Alignment := eLeftAlign;
+            Obj.WordWrap := True;
+            Obj.ClipToRect := True;
+            Obj.ShowBorder := (GetFieldFromPipeString(Rec, 9) = '1');
+            Obj.LineWidth := eSmall;
+            Obj.Color := 0;
+            Obj.TextColor := 0;
+            FillColor := StrToInt(GetFieldFromPipeString(Rec, 10));
+            if (FillColor >= 0) then
+            begin
+                Obj.IsSolid := True;
+                Obj.AreaColor := FillColor;
+            end
+            else
+                Obj.IsSolid := False;
+            Obj.Text := StringReplace(GetFieldFromPipeString(Rec, 11), '<NL>', #13#10, REPLACEALL);
+            TargetDoc.RegisterSchObjectInContainer(Obj);
+            SchServer.RobotManager.SendMessage(TargetDoc.I_ObjectAddress, c_BroadCast,
+                SCHM_PrimitiveRegistration, Obj.I_ObjectAddress);
+            FrameCount := FrameCount + 1;
         end;
+        // TEMPLATEFROM, SAVEAS and PROJECT were consumed before the sheet was made.
     end;
 
     // Parameter text last, once every part is placed.
@@ -1933,6 +2203,7 @@ begin
     end;
 
     SchServer.ProcessControl.PostProcess(TargetDoc, '');
+    if (TplSrc <> nil) or (DocParamCount > 0) then TargetDoc.UpdateDocumentProperties;
     TargetDoc.GraphicallyInvalidate;
 
     // Pin map: absolute connection point of every placed pin, so a caller can
@@ -1962,10 +2233,81 @@ begin
     PinMap.SaveToFile('C:\Users\Public\altium_mcp\pin_map.txt');
     PinMap.Free;
 
-    Result := '{"success": true, "detached_from": "' + Adopted + '", "sheet": "' + TargetDoc.DocumentName +
+    Extra := '';
+    if (TplSrc <> nil) then
+        Extra := Extra + ', "template_file": "' + JSONEscapeString(TargetDoc.TemplateFileName) +
+                 '", "template_primitives": ' + IntToStr(TplDstKids);
+    Extra := Extra + ', "text_frames": ' + IntToStr(FrameCount) +
+             ', "doc_params": ' + IntToStr(DocParamCount);
+
+    // Leave the built sheet in front and fitted: the symbol libraries opened
+    // for the parts are current by now. Mutations must stay observable, and
+    // when Altium runs elevated a non-elevated caller cannot click its tabs
+    // (UIPI drops the injected input - measured 2026-11-17). Done before the
+    // save so a failed save still leaves the sheet in view.
+    // An unsaved free document's "path" is its bare name.
+    SrvDoc := Client.GetDocumentByPath(TargetDoc.DocumentName);
+    if (SrvDoc <> nil) then
+    begin
+        Client.ShowDocument(SrvDoc);
+        ResetParameters;
+        AddStringParameter('Action', 'Document');
+        RunProcess('Sch:Zoom');
+        Extra := Extra + ', "shown": true';
+    end
+    else
+        Extra := Extra + ', "shown": false';
+
+    // SAVEAS / PROJECT last, once the sheet is complete.
+    // TRAP: DoSafeChangeFileNameAndSave(path, 'SCH') renamed the document but
+    // wrote no file (AD26.11.1, 2026-11-17). The format names a save filter
+    // of the server (System\Advsch.ins, SaveFilters), so the caller passes it
+    // and the return value is reported rather than assumed.
+    if (SaveAs <> '') then
+    begin
+        if (SrvDoc = nil) then
+        begin
+            Spec.Free;
+            Placement.Free;
+            Result := '{"success": false, "error": "built but could not resolve the sheet to save it", "sheet": "' +
+                      JSONEscapeString(TargetDoc.DocumentName) + '"' + Extra + '}';
+            Exit;
+        end;
+        SaveOk := SrvDoc.DoSafeChangeFileNameAndSave(SaveAs, SaveKind);
+        if SaveOk then
+            Extra := Extra + ', "save_returned": true'
+        else
+            Extra := Extra + ', "save_returned": false';
+        Extra := Extra + ', "save_kind": "' + JSONEscapeString(SaveKind) + '"';
+        if not FileExists(SaveAs) then
+        begin
+            Spec.Free;
+            Placement.Free;
+            Result := '{"success": false, "error": "built but the save did not produce the file", "sheet": "' +
+                      JSONEscapeString(TargetDoc.DocumentName) + '"' + Extra + '}';
+            Exit;
+        end;
+        Extra := Extra + ', "saved_as": "' + JSONEscapeString(SaveAs) + '"';
+
+        if (TargetProj <> nil) then
+        begin
+            TargetProj.DM_AddSourceDocument(SaveAs);
+            InProject := False;
+            for i := 0 to TargetProj.DM_LogicalDocumentCount - 1 do
+                if (UpperCase(TargetProj.DM_LogicalDocuments(i).DM_FullPath) = UpperCase(SaveAs)) then
+                    InProject := True;
+            if InProject then
+                Extra := Extra + ', "in_project": true'
+            else
+                Extra := Extra + ', "in_project": false';
+        end;
+    end;
+
+    Result :='{"success": true, "detached_from": "' + Adopted + '", "sheet": "' +
+              JSONEscapeString(TargetDoc.DocumentName) +
               '", "parts": ' + IntToStr(PartCount) +
               ', "graphics": ' + IntToStr(GfxCount) +
-              ', "pins": ' + IntToStr(PinCount) + '}';
+              ', "pins": ' + IntToStr(PinCount) + Extra + '}';
     Spec.Free;
     Placement.Free;
 end;

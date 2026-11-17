@@ -48,7 +48,12 @@ Replicate the symbol out of its source `.SchLib` and register it:
 2. `SchServer.GetCurrentSchDocument` -> iterate `SchLibIterator_Create` with
    `MkSet(eSchComponent)` to find the component whose `LibReference` matches
    the DB's `Symbol_Name`
-3. `Component.Replicate` (returns a detached copy)
+3. `Component.Replicate` (returns a detached copy). **AD26.11.1 trap
+   (measured 2026-11-17):** the copy holds only the designator and comment;
+   pins and body graphics stay behind, so the placed part draws as a bare
+   designator with `pins: 0`. `BuildCircuitFromSpec` therefore replicates each
+   missing child into the copy (`CopyMissingChildren` in
+   `server/AltiumScript/schematic_utils.pas`) before step 6.
 4. `GetWorkSpace.DM_CreateNewDocument('SCH')` for a target sheet (also focuses
    it); `SchServer.GetCurrentSchDocument` then returns it
 5. On the replica set `Designator.Text`, `Location` (`Point(MilsToCoord..)`),
