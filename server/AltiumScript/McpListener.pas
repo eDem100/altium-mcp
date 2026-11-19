@@ -132,9 +132,8 @@ end;
 procedure tmr_PollTimer(Sender: TObject);
 begin
     // Re-entrancy guard. This tick does not pump messages itself, but the
-    // Altium calls underneath ProcessPendingRequest may, and a second tick
-    // arriving mid-command would pick up the NEXT request while the first is
-    // still in flight.
+    // Altium calls underneath Run may, and a second tick arriving mid-command
+    // would pick up the NEXT request while the first is still in flight.
     if lbl_State.Caption = STATE_BUSY then
         Exit;
 
@@ -153,16 +152,23 @@ begin
         // turns out: a tick that reaches this point proves the pump is running.
         WriteHeartbeat(True);
 
-        lbl_State.Caption := STATE_BUSY;
-        try
-            ProcessPendingRequest;
-        finally
-            lbl_State.Caption := STATE_IDLE;
+        // Run is the bridge's own entry point in Altium_API.pas, the same one
+        // the command line invokes: it consumes request.json, executes it and
+        // writes response.json with the request_id echoed. Called only when a
+        // request is waiting, because Run logs a missing request as an error.
+        if FileExists(LISTENER_ROOT + 'request.json') then
+        begin
+            lbl_State.Caption := STATE_BUSY;
+            try
+                Run;
+            finally
+                lbl_State.Caption := STATE_IDLE;
+            end;
         end;
     except
         // A failing tick must not kill the pump: the next request may be fine.
-        // ProcessPendingRequest has already written whatever error it could
-        // into the response file.
+        // Run has already written whatever error it could into the response
+        // file.
         try
             lbl_State.Caption := STATE_IDLE;
         except
