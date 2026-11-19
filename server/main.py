@@ -2814,6 +2814,15 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
                         [snap_to_wire_end] (true, or a search radius in
                         unit: puts the label on the nearest wire end to its
                         target, 100 mil by default)
+      edit_text_frame   x, y (the frame's bottom-left corner), [text] (its
+                        current text, to pick one of several frames there),
+                        [alignment] (left, center, right), [text_margin]
+                        (unit, the gap between border and text),
+                        [new_text], [clip_to_rect] (true/false: with it on, a
+                        margin also clips the text, so a margin that centres
+                        a line cuts off "_" and other descenders); a line
+                        break in text is "\\n". Read back, a mismatch is an
+                        error   (FORK)
       delete_at         kind (wire, net_label, power_port, junction, no_erc,
                         port, note), x, y, [text]: removes a wire passing
                         through the point, or the object located there

@@ -775,6 +775,11 @@ class RollbackToolTest(unittest.TestCase):
         patch = mock.patch.object(main, "SANDBOX_SNAPSHOTS", self.dir / "snaps")
         patch.start()
         self.addCleanup(patch.stop)
+        # FORK: these tests describe the tool without the in-Altium listener;
+        # the real heartbeat on the machine running them must not decide that
+        patch = mock.patch.object(main, "listener_is_live", lambda: False)
+        patch.start()
+        self.addCleanup(patch.stop)
         self.sb = main._sandbox()
         sandbox.take_snapshot(self.sb.snapshot_dir("Sbx_1"), [str(self.doc)])
         # The script edits the document and leaves it unsaved
@@ -808,6 +813,16 @@ class RollbackToolTest(unittest.TestCase):
         self.assertEqual(result["restored"], [str(self.doc)])
         self.assertEqual(calls, [])
         self.assertEqual(self.doc.read_bytes(), b"before")
+
+    def test_refused_while_the_listener_is_live(self):
+        # FORK: rollback reaches Altium on the command line, which the
+        # listener path must never do; nothing is restored
+        with self.mock.patch.object(self.main, "listener_is_live", lambda: True):
+            result, calls = self.rollback(running=True)
+        self.assertFalse(result["success"])
+        self.assertIn("listener", result["error"])
+        self.assertEqual(calls, [])
+        self.assertEqual(self.doc.read_bytes(), b"script saved this")
 
     def test_altium_not_running_still_checks_the_disk(self):
         self.doc.write_bytes(b"user saved this")

@@ -27,6 +27,8 @@ PORT_STYLES = {"none": 0, "left": 1, "right": 2, "left_right": 3,
                "none_vertical": 4, "top": 5, "bottom": 6, "top_bottom": 7}
 SIDES = {"left": 0, "right": 1, "top": 2, "bottom": 3}
 LINE_WIDTHS = {"smallest": 0, "small": 1, "medium": 2, "large": 3}
+# FORK: text frame horizontal alignment, as the script names it
+FRAME_ALIGN = {"left": "L", "center": "C", "right": "R"}
 # Operations whose x, y may be given as "at": a pin reference
 AT_OPS = ("add_net_label", "add_power_port", "add_junction", "add_no_erc", "add_port")
 # Operations that move a part's pins, so a later reference to them is stale
@@ -50,6 +52,8 @@ OPS = {
     "edit_sheet_entry": (("sheet", "name"), ("side", "distance", "io_type", "style", "new_name")),
     "move_wire_vertex": (("x", "y", "to_x", "to_y"), ()),
     "move_net_label": (("x", "y"), ("text", "to_x", "to_y", "orientation", "justification", "snap_to_wire_end")),
+    # FORK: an existing text frame, found by its location (bottom-left corner)
+    "edit_text_frame": (("x", "y"), ("text", "alignment", "text_margin", "new_text", "clip_to_rect")),
     "place_component": (("library", "symbol", "designator", "x", "y"),
                         ("rotation", "mirror", "comment",
                          # filled in from a DbLib row by dblib.place_operation
@@ -66,6 +70,17 @@ def _text(v, what) -> str:
     if any(c in s for c in "|\r\n"):
         raise OpError(f"{what} cannot contain '|' or a line break")
     return s
+
+
+def _frame_text(v, what) -> str:
+    """FORK: text frame text for the spec line: a line break is sent as <NL>,
+    as build_schematic's TEXTFRAME records send it."""
+    s = str(v).replace("\r\n", "\n")
+    if "|" in s or "\r" in s:
+        raise OpError(f"{what} cannot contain '|' or a carriage return")
+    if "<NL>" in s:
+        raise OpError(f"{what} cannot contain the literal '<NL>'; use a line break")
+    return s.replace("\n", "<NL>")
 
 
 def _flag(v) -> str:
@@ -356,6 +371,24 @@ def encode_operations(operations: list, unit: str = "mil") -> Tuple[List[str], s
                     "" if op.get("orientation") is None else str(_int_in(op["orientation"], 0, 3, "orientation")),
                     "" if op.get("justification") is None else str(_int_in(op["justification"], 0, 8, "justification")),
                     c(snap, "snap_to_wire_end") if snap else ""]))
+            elif kind == "edit_text_frame":
+                # FORK: TFRAME|x|y|match|align|margin|has_new|new_text|clip; '' keeps a value
+                if all(op.get(k) is None for k in ("alignment", "text_margin", "new_text", "clip_to_rect")):
+                    raise OpError("edit_text_frame needs alignment, text_margin, new_text or clip_to_rect")
+                if op.get("clip_to_rect") is not None and not isinstance(op["clip_to_rect"], bool):
+                    raise OpError("clip_to_rect is true or false")
+                margin = op.get("text_margin")
+                if margin is not None and not (isinstance(margin, (int, float)) and not isinstance(margin, bool)
+                                               and margin >= 0):
+                    raise OpError("text_margin must be 0 or more")
+                lines.append("|".join([
+                    "TFRAME", c(op["x"]), c(op["y"]),
+                    _frame_text(op["text"], "text") if op.get("text") is not None else "",
+                    _choice(op.get("alignment"), FRAME_ALIGN, "alignment"),
+                    "" if margin is None else c(margin, "text_margin"),
+                    "0" if op.get("new_text") is None else "1",
+                    "" if op.get("new_text") is None else _frame_text(op["new_text"], "new_text"),
+                    "" if op.get("clip_to_rect") is None else _flag(op["clip_to_rect"])]))
             elif kind == "delete_at":
                 if op["kind"] not in DELETE_KINDS:
                     raise OpError(f"kind is one of {', '.join(DELETE_KINDS)}")

@@ -4052,6 +4052,91 @@ begin
     Result := True;
 end;
 
+// FORK: a text frame's text with its line breaks as <NL>, the form the spec
+// line carries
+function FrameTextKey(S: String): String;
+begin
+    Result := StringReplace(S, #13#10, '<NL>', REPLACEALL);
+    Result := StringReplace(Result, #10, '<NL>', REPLACEALL);
+end;
+
+// FORK: TFRAME|x|y|match|align|margin|has_new|new_text|clip. Finds the one
+// text frame whose Location (bottom-left) is at x, y - and whose text is
+// match, when given - then sets its alignment (L/C/R), text margin (Altium
+// units), text and clip-to-rect (0/1); '' keeps a value. Reads the frame back
+// and fails on a mismatch. TRAP (measured, AD26.11.1): with ClipToRect on,
+// the clip box is the frame less the margin, so a margin that centres a line
+// vertically cuts off its descenders ('_' disappears).
+function EditTextFrame(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
+var
+    Iterator : ISch_Iterator;
+    Frm, Found : ISch_TextFrame;
+    X, Y, Tol, n, Margin : Integer;
+    Match, Align, NewText : String;
+    WantAlign : Integer;
+begin
+    Result := False;
+    X := SchField(Rec, 1, 0);
+    Y := SchField(Rec, 2, 0);
+    Match := GetFieldFromPipeString(Rec, 3);
+    Align := GetFieldFromPipeString(Rec, 4);
+    Tol := MilsToCoord(1);
+    Found := nil;
+    n := 0;
+    Iterator := Doc.SchIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eTextFrame));
+    Frm := Iterator.FirstSchObject;
+    while Frm <> nil do
+    begin
+        if (Abs(Frm.Location.X - X) <= Tol) and (Abs(Frm.Location.Y - Y) <= Tol) and
+           ((Match = '') or (FrameTextKey(Frm.Text) = Match)) then
+        begin
+            Found := Frm;
+            n := n + 1;
+        end;
+        Frm := Iterator.NextSchObject;
+    end;
+    Doc.SchIterator_Destroy(Iterator);
+    if Found = nil then
+    begin
+        Msg := 'no text frame at that point';
+        if Match <> '' then Msg := Msg + ' with that text';
+        Exit;
+    end;
+    if n > 1 then
+    begin
+        Msg := IntToStr(n) + ' text frames at that point; give text';
+        Exit;
+    end;
+
+    if Align = 'C' then WantAlign := eHorizontalCentreAlign
+    else if Align = 'R' then WantAlign := eRightAlign
+    else WantAlign := eLeftAlign;
+    Margin := SchField(Rec, 5, -1);
+    NewText := StringReplace(GetFieldFromPipeString(Rec, 7), '<NL>', #13#10, REPLACEALL);
+
+    SchBeginModify(Found);
+    if Align <> '' then Found.Alignment := WantAlign;
+    if Margin >= 0 then Found.TextMargin := Margin;
+    if GetFieldFromPipeString(Rec, 6) = '1' then Found.Text := NewText;
+    if GetFieldFromPipeString(Rec, 8) <> '' then Found.ClipToRect := GetFieldFromPipeString(Rec, 8) = '1';
+    SchEndModify(Found);
+
+    // Read back: what the frame holds now, not what was asked for
+    if (Align <> '') and (Found.Alignment <> WantAlign) then
+        Msg := 'alignment reads back as ' + IntToStr(Found.Alignment)
+    else if (Margin >= 0) and (Found.TextMargin <> Margin) then
+        Msg := 'text margin reads back as ' + IntToStr(Found.TextMargin)
+    else if (GetFieldFromPipeString(Rec, 6) = '1') and
+            (FrameTextKey(Found.Text) <> GetFieldFromPipeString(Rec, 7)) then
+        Msg := 'text reads back as ' + FrameTextKey(Found.Text)
+    else if (GetFieldFromPipeString(Rec, 8) <> '') and
+            (Found.ClipToRect <> (GetFieldFromPipeString(Rec, 8) = '1')) then
+        Msg := 'clip to rect did not change'
+    else
+        Result := True;
+end;
+
 // One edit record; Msg says why it failed
 function ApplySchEdit(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
 var
@@ -4219,6 +4304,8 @@ begin
         Result := MoveWireVertex(Doc, Rec, Msg)
     else if Kind = 'LABELMOVE' then
         Result := MoveNetLabel(Doc, Rec, Msg)
+    else if Kind = 'TFRAME' then
+        Result := EditTextFrame(Doc, Rec, Msg)
     else
         Msg := 'unknown edit ' + Kind;
 end;

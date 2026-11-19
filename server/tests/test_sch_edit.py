@@ -209,6 +209,31 @@ class SheetAndWireTest(unittest.TestCase):
                                  "LABELMOVE|10000|20000||50000|60000|1||"])
         self.assertIn("together", encode_operations([{"op": "move_net_label", "x": 1, "y": 2, "to_x": 5}])[1])
 
+    def test_edit_text_frame(self):
+        # FORK: TFRAME|x|y|match|align|margin|has_new|new_text|clip; '' keeps a value
+        lines, err = encode_operations([
+            {"op": "edit_text_frame", "x": 200, "y": 300, "alignment": "center", "text_margin": 4},
+            {"op": "edit_text_frame", "x": 1, "y": 2, "text": "NOTES:\n 1. A", "new_text": "NOTES:\n1. A"},
+            {"op": "edit_text_frame", "x": 1, "y": 2, "new_text": ""},
+            {"op": "edit_text_frame", "x": 1, "y": 2, "clip_to_rect": False}])
+        self.assertEqual(err, "")
+        self.assertEqual(lines, ["TFRAME|2000000|3000000||C|40000|0||",
+                                 "TFRAME|10000|20000|NOTES:<NL> 1. A|||1|NOTES:<NL>1. A|",
+                                 "TFRAME|10000|20000||||1||",
+                                 "TFRAME|10000|20000||||0||0"])
+
+    def test_edit_text_frame_refusals(self):
+        def error(**kw):
+            return encode_operations([dict({"op": "edit_text_frame", "x": 1, "y": 2}, **kw)])[1]
+        self.assertIn("needs alignment", error())
+        self.assertIn("alignment is one of", error(alignment="middle"))
+        self.assertIn("text_margin", error(text_margin=-1))
+        self.assertIn("text_margin", error(text_margin=True))
+        self.assertIn("clip_to_rect", error(clip_to_rect="no"))
+        self.assertIn("'|'", error(new_text="a|b"))
+        self.assertIn("<NL>", error(text="a<NL>b", alignment="left"))
+        self.assertIn("does not take", error(alignment="left", font="Arial"))
+
 
 if __name__ == "__main__":
     unittest.main()
