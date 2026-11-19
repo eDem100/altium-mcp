@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "altium-mcp",
-  "version": "0.4.5",
+  "version": "0.7.0",
   "description": "Altium Designer integration server providing PCB and schematic design automation tools through MCP",
   "author": {
     "name": "Stephen Thompson"
@@ -16,12 +16,120 @@
   },
   "tools": [
     {
+      "name": "get_output_job_containers",
+      "description": "List the output containers of an OutJob file (outjob_path, or the first open OutJob)"
+    },
+    {
+      "name": "run_output_jobs",
+      "description": "Run output job containers from an OutJob file (outjob_path, or the first open OutJob) and check that PDF containers wrote their file"
+    },
+    {
+      "name": "get_outjob_settings",
+      "description": "Read an .OutJob file from disk and return containers, outputs and decoded fabrication settings (Gerber layers, NC Drill, IPC-D-356, pick and place)"
+    },
+    {
+      "name": "list_open_documents",
+      "description": "List the documents open in Altium: path, kind, unsaved changes, and which one is in front"
+    },
+    {
+      "name": "reload_document",
+      "description": "Close an open document and open it again from disk; refused with unsaved changes unless discard_changes"
+    },
+    {
+      "name": "create_outjob",
+      "description": "Create an .OutJob file, empty or from a template OutJob, and optionally add it to a project"
+    },
+    {
+      "name": "edit_outjob",
+      "description": "Add, change or remove an OutJob's containers, and copy, remove, rename, enable or move its outputs or change one output setting"
+    },
+    {
+      "name": "get_project_info",
+      "description": "Get the focused project's parameters, documents with unsaved-changes state, sheet count and variants"
+    },
+    {
+      "name": "get_project_components",
+      "description": "List every component of the compiled project with comment, footprint, library reference, sheet and optional parameters"
+    },
+    {
+      "name": "get_erc_violations",
+      "description": "Compile a project (the focused one, or one by path) in memory and list ERC/compiler violations by level"
+    },
+    {
+      "name": "preview_eco",
+      "description": "Show what Update PCB would change (components, nets, classes, rooms) between the compiled project and its board, without running it"
+    },
+    {
+      "name": "compare_netlist",
+      "description": "Compile a project and compare its netlist with a saved snapshot: nets and pins added, removed, renamed or moved"
+    },
+    {
+      "name": "get_board_summary",
+      "description": "Summarise the focused PCB: outline, origin, dimensions, vias by hole size, components per side, primitives per layer and overlay texts"
+    },
+    {
+      "name": "get_component_primitives",
+      "description": "List the primitives of PCB components with their layers and pad mask expansions"
+    },
+    {
+      "name": "get_all_designators",
+      "description": "Get all component designators from the current Altium board"
+    },
+    {
       "name": "get_all_component_property_names",
       "description": "Get all available component property names (JSON keys) from all components"
     },
     {
       "name": "get_component_property_values",
       "description": "Get values of a specific property for all components"
+    },
+    {
+      "name": "get_component_data",
+      "description": "Get all data for components in Altium"
+    },
+    {
+      "name": "get_component_pins",
+      "description": "Get pin data for components in Altium"
+    },
+    {
+      "name": "get_schematic_data",
+      "description": "Get schematic data for components in Altium"
+    },
+    {
+      "name": "create_schematic_symbol",
+      "description": "Create a new schematic symbol in the current library with the specified pins. Supports multi-part symbols via part_count and per-pin owner_part_id, plus active-low pin name overbar notation"
+    },
+    {
+      "name": "get_symbol_primitives",
+      "description": "Inventory a schematic library, or dump a symbol's complete geometry (graphics and pins, in mils)"
+    },
+    {
+      "name": "create_symbols_batch",
+      "description": "Create many schematic symbols in one script run from a plain-text spec file"
+    },
+    {
+      "name": "build_schematic",
+      "description": "Build a wired schematic on a new sheet from .SchLib parts, wires, junctions, net labels and power ports; returns each placed pin's connection point"
+    },
+    {
+      "name": "check_schematic",
+      "description": "Check saved schematic sheets for drafting problems: pin taps, label placement, text overlaps, dangling wires, slanted wires, pins off the grid"
+    },
+    {
+      "name": "check_hierarchy",
+      "description": "Check that sheet entries match the ports of their child sheets, harness types and harness definitions agree, and every signal harness has a type"
+    },
+    {
+      "name": "edit_schematic",
+      "description": "Change an existing schematic sheet as one undo step: move, place or delete parts, set parameters, move text, add wires, labels, power ports and junctions"
+    },
+    {
+      "name": "get_schematic_pins",
+      "description": "List a schematic sheet's pins live from Altium: connection point, number, name and electrical type"
+    },
+    {
+      "name": "render_sheet",
+      "description": "Draw a schematic sheet or part of it as a picture, read from the saved .SchDoc file"
     },
     {
       "name": "get_symbol_placement_rules",
@@ -36,38 +144,6 @@
       "description": "Search for a symbol by name in a schematic library (.SchLib) and navigate to it. Supports partial name matching; opens the library file if a path is provided or shows a file picker if not"
     },
     {
-      "name": "create_schematic_symbol",
-      "description": "Create a new schematic symbol in the current library with the specified pins. Supports multi-part symbols via part_count and per-pin owner_part_id, plus active-low pin name overbar notation"
-    },
-    {
-      "name": "get_schematic_data",
-      "description": "Get schematic data for components in Altium"
-    },
-    {
-      "name": "get_pcb_layers",
-      "description": "Get detailed information about all layers in the current Altium PCB"
-    },
-    {
-      "name": "set_pcb_layer_visibility",
-      "description": "Set visibility for specified PCB layers"
-    },
-    {
-      "name": "get_component_data",
-      "description": "Get all data for components in Altium"
-    },
-    {
-      "name": "get_selected_components_coordinates",
-      "description": "Get coordinates and positioning information for selected components in Altium layout"
-    },
-    {
-      "name": "get_all_designators",
-      "description": "Get all component designators from the current Altium board"
-    },
-    {
-      "name": "get_component_pins",
-      "description": "Get pin data for components in Altium"
-    },
-    {
       "name": "get_all_nets",
       "description": "Return every unique net name in the active PCB document"
     },
@@ -76,16 +152,144 @@
       "description": "Create a new net class and add specified nets to it"
     },
     {
-      "name": "set_component_position",
-      "description": "Set a component's absolute position (X, Y, rotation) in the PCB layout"
+      "name": "get_pcb_layers",
+      "description": "Get detailed information about all layers in the current Altium PCB"
+    },
+    {
+      "name": "get_pcb_layer_stackup",
+      "description": "Get the detailed layer stackup information from the current Altium PCB including copper thickness, dielectric materials, constants, and heights"
+    },
+    {
+      "name": "set_pcb_layer_visibility",
+      "description": "Set visibility for specified PCB layers"
+    },
+    {
+      "name": "get_pcb_rules",
+      "description": "Get all design rules from the current Altium PCB"
+    },
+    {
+      "name": "create_pcb_rule",
+      "description": "Add a design rule (clearance, width, hole size, routing via, mask expansion or polygon connect) to a PCB"
+    },
+    {
+      "name": "run_drc",
+      "description": "Run the design rule check on a PCB and list the violations with measured values, optionally filtered by rule, net or area"
+    },
+    {
+      "name": "check_objects_drc",
+      "description": "Run the board's design rules on chosen PCB objects only, without a batch DRC"
+    },
+    {
+      "name": "get_selected_components_coordinates",
+      "description": "Get coordinates and positioning information for selected components in Altium layout"
     },
     {
       "name": "move_components",
       "description": "Move selected components by specified X and Y offsets in the PCB layout"
     },
     {
-      "name": "get_screenshot",
-      "description": "Take a screenshot of the Altium window"
+      "name": "set_component_position",
+      "description": "Set a component's absolute position (X, Y, rotation) in the PCB layout"
+    },
+    {
+      "name": "place_components",
+      "description": "Place any number of components at absolute positions (x, y, rotation, side, lock, designator and comment text) on a named board, in one undo step"
+    },
+    {
+      "name": "check_placement",
+      "description": "Find component overlaps and clearance violations using true primitive-to-primitive distances"
+    },
+    {
+      "name": "check_orientation",
+      "description": "Advisory check for 2-pad passives whose rotation could be improved"
+    },
+    {
+      "name": "get_net_connections",
+      "description": "For the nets touching the given components, list every pad on each net with airline (unrouted) lengths"
+    },
+    {
+      "name": "check_routing",
+      "description": "Find routed track segments that are not 0, 45 or 90 degrees, and right-angle or acute corners"
+    },
+    {
+      "name": "route_track",
+      "description": "Add a track through waypoints with every segment exactly 0, 45 or 90 degrees"
+    },
+    {
+      "name": "route_path",
+      "description": "Route a net through waypoints at 0/45/90 degrees, changing layer with vias, in one undo step and checked against the rules"
+    },
+    {
+      "name": "place_vias",
+      "description": "Add vias to a PCB at positions in mils, with nets and layer spans checked against the board first"
+    },
+    {
+      "name": "get_layout",
+      "description": "Read the layout of a group of components or an area: placement, texts, tracks, arcs, vias, fills, regions, cutouts and pours with their full outlines and settings, in place_copper's form"
+    },
+    {
+      "name": "place_copper",
+      "description": "Add tracks and arcs at any angle, vias, fills, regions, cutouts and polygon pours in one undo step, all checked first; can move and rename nets to repeat a layout"
+    },
+    {
+      "name": "get_unrouted_connections",
+      "description": "List the connections still to be routed for some components, nets or the whole board, naming the pads at each end, with no DRC limit"
+    },
+    {
+      "name": "fanout_pads",
+      "description": "Fan out pads to vias beside them (e.g. ground and power pads to their planes), widths and gaps from the board's rules"
+    },
+    {
+      "name": "route_connections",
+      "description": "Route a group's unrouted connections with a maze router at 0/45/90 degrees, widths and clearance from the board's rules, vias between the layers allowed"
+    },
+    {
+      "name": "delete_pcb_objects",
+      "description": "Rip up copper: tracks, arcs, vias, pours, regions, fills or cutouts picked by kind, net, layer, area or a group's designators; locked objects kept"
+    },
+    {
+      "name": "modify_pcb_objects",
+      "description": "Change the width, via size, net or layer of copper picked as for delete_pcb_objects, in one undo step"
+    },
+    {
+      "name": "place_polygon_pour",
+      "description": "Add a polygon pour from an outline to a PCB and pour it"
+    },
+    {
+      "name": "place_cutout",
+      "description": "Add a polygon pour cutout or a board cutout to a PCB and repour the polygons it overlaps"
+    },
+    {
+      "name": "repour_polygons",
+      "description": "Repour all polygon pours on a PCB, or those picked by name, net, layer or area, in pour order, as one undo step"
+    },
+    {
+      "name": "get_pour_report",
+      "description": "Report what each polygon pour poured: pieces, islands, slivers, and pours with no net or no copper"
+    },
+    {
+      "name": "objects_in_area",
+      "description": "List the PCB objects in a box with their layer, net, owner, geometry and a ref for the other geometry tools"
+    },
+    {
+      "name": "clearance",
+      "description": "Measure the edge-to-edge gap between two PCB objects and check the clearance rule that applies"
+    },
+    {
+      "name": "drag_copper",
+      "description": "Move a via or a track segment and keep it connected: attached track ends stretch and vias move along"
+    },
+    {
+      "name": "render_pcb",
+      "description": "Draw a PCB area as a picture from its objects, without touching Altium's view"
+    },
+    {
+      "name": "query_objects",
+      "description": "Find PCB objects with Altium's query language (as the PCB Filter panel runs it), with sizes given in a unit and an optional area"
+    },
+    {
+      "name": "which_rule",
+      "description": "Give the design rule the DRC applies to a PCB object or a pair of objects, and whether they pass it"
     },
     {
       "name": "layout_duplicator",
@@ -96,24 +300,72 @@
       "description": "Second step of layout duplication. Applies the layout of source components to destination components"
     },
     {
-      "name": "get_pcb_rules",
-      "description": "Get all design rules from the current Altium PCB"
+      "name": "auto_place_silkscreen",
+      "description": "Bulk-place designators with the Silkscreen Auto Placer script, run headless inside Altium in one undo step"
     },
     {
-      "name": "get_pcb_layer_stackup",
-      "description": "Get the detailed layer stackup information from the current Altium PCB including copper thickness, dielectric materials, constants, and heights"
+      "name": "check_silkscreen",
+      "description": "Find designators that need work: Altium's own silk rules plus quality checks such as far from the part, ambiguous, over a body or upside down"
     },
     {
-      "name": "get_output_job_containers",
-      "description": "Get all available output job containers from a specified OutJob file"
+      "name": "view_silkscreen",
+      "description": "Render the silkscreen around some designators or in a region, with a grid labelled in board coordinates"
     },
     {
-      "name": "run_output_jobs",
-      "description": "Run specified output job containers"
+      "name": "get_designator_options",
+      "description": "Ranked legal spots for designators, drawn as numbered boxes"
+    },
+    {
+      "name": "get_label_block_options",
+      "description": "Options for placing a row of parts' designators together as a block, linked to the parts by a leader line or index markers"
+    },
+    {
+      "name": "place_label_block",
+      "description": "Apply a label block: move the designators into it, draw its link, and check both with Altium's silk rules"
+    },
+    {
+      "name": "remove_label_block",
+      "description": "Remove the label block of some parts: delete its link graphics and leave the designators where they are"
+    },
+    {
+      "name": "set_designator_positions",
+      "description": "Place designators by coordinates or relative to their part, and get Altium's DRC verdict for each"
     },
     {
       "name": "create_pcb_footprint",
       "description": "Create a new PCB footprint in the currently active PcbLib document with SMD pads, auto-generated courtyard, and silkscreen with pin 1 indicator"
+    },
+    {
+      "name": "get_footprint_primitives",
+      "description": "Inventory a PCB library, or dump footprint geometry (pads with full stack and hole detail, tracks, arcs, fills, texts, regions)"
+    },
+    {
+      "name": "create_footprints_batch",
+      "description": "Create many PCB footprints in one script run from a plain-text spec file"
+    },
+    {
+      "name": "get_screenshot",
+      "description": "Take a screenshot of one named thing in Altium: the window, a document, a dialog, a panel or a screen region"
+    },
+    {
+      "name": "get_altium_windows",
+      "description": "List Altium's own dialogs and floating panels, which can lie over a board in a screenshot or keep Altium waiting"
+    },
+    {
+      "name": "dismiss_dialog",
+      "description": "Close an open Altium dialog by its hwnd or title, as its close box does; never presses a button"
+    },
+    {
+      "name": "run_altium_script",
+      "description": "Run a DelphiScript snippet in an isolated sandbox and get a step-by-step log, its result, and the statement that failed"
+    },
+    {
+      "name": "rollback_altium_script",
+      "description": "Undo a run_altium_script run by restoring the documents it copied before the run, refusing files changed on disk since and documents with unsaved changes"
+    },
+    {
+      "name": "ensure_altium_script_skill",
+      "description": "Check whether the altium-script skill (Altium DelphiScript API reference) is installed, and install it on request"
     },
     {
       "name": "get_server_status",
@@ -121,7 +373,9 @@
     }
   ],
   "compatibility": {
-    "platforms": ["win32"],
+    "platforms": [
+      "win32"
+    ],
     "runtimes": {
       "python": ">=3.10"
     }

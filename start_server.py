@@ -25,24 +25,34 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
 
-# The web stack is pinned, not just mcp. Only mcp was pinned before, so pip
-# resolved its transitive dependencies to current releases and the venv ended
-# up on starlette 1.6.0 against the 0.46.1 that mcp 1.5.0 was released with -
-# a major version apart. That went unnoticed while the server only spoke stdio,
-# because none of it was on the path; it matters now that the server also
-# serves SSE, which is starlette and uvicorn end to end. Versions below are
-# requirements.txt's, i.e. the set upstream exported and tested together.
-#
-# Changing this list changes the venv hash, so the next start builds a fresh
-# environment in a new directory. That is expected, not a fault.
+# The hash-locked set exported by uv. Installed when present, so no
+# dependency of mcp floats to a release it was never tested with (pydantic
+# 2.14 breaking mcp 1.5.0 at import was one).
+LOCKED_REQUIREMENTS = SCRIPT_DIR / "requirements.txt"
+
+# Fallback when the lock file is missing, or pins wheels the interpreter has
+# none for (a newer Python than the lock was made with).
 REQUIREMENTS = [
-    "mcp[cli]==1.5.0",
-    "starlette==0.46.1",
-    "sse-starlette==2.2.1",
-    "uvicorn==0.34.0",
+    # mcp declares the pydantic range it supports (per Python version), so
+    # pydantic needs no entry of its own here
+    "mcp[cli]==1.30.0",
     "pillow>=11.1.0",
     "pywin32>=310",
 ]
+
+
+def _locked_text():
+    try:
+        return LOCKED_REQUIREMENTS.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _marker_payload():
+    # Both inputs, so a change to either the lock file or the fallback list
+    # invalidates the venv. Not which one was installed: that is decided at
+    # build time and must not make a ready venv look stale.
+    return "\n".join(REQUIREMENTS) + "\n--locked--\n" + _locked_text()
 
 
 def _data_dir():
@@ -63,7 +73,7 @@ def _data_dir():
 def _venv_key():
     # One venv per (requirements, interpreter version). Changing either gets a
     # fresh directory instead of mutating one another process may be using.
-    text = "|".join(REQUIREMENTS) + "|py%d.%d" % sys.version_info[:2]
+    text = _marker_payload() + "|py%d.%d" % sys.version_info[:2]
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
@@ -82,17 +92,16 @@ LAUNCH_WAIT_SECONDS = 50
 # A lock whose owner is still alive but older than this belongs to a build
 # that hung. Generous: the owner-alive check is the real staleness test.
 STALE_LOCK_SECONDS = 1800
-
-
-def _marker_payload():
-    return "\n".join(REQUIREMENTS)
+# A venv another launch has not used for this long, and that nothing runs
+# from, is deleted after a build (see _prune_old_venvs)
+KEEP_UNUSED_DAYS = 14
 
 
 def venv_is_ready():
     # python.exe alone is not enough: `python -m venv` can succeed and the pip
     # install still fail, leaving an interpreter with no mcp module. The marker
     # is written last and records what was installed, so a change to
-    # REQUIREMENTS also invalidates it.
+    # the requirements also invalidates it.
     if not PYTHON_EXE.exists():
         return False
     try:
@@ -103,7 +112,10 @@ def venv_is_ready():
 
 def _manual_build_message(reason):
     pip_exe = VENV_DIR / "Scripts" / "pip.exe"
-    requirements = " ".join('"%s"' % r for r in REQUIREMENTS)
+    if _locked_text():
+        requirements = '-r "%s"' % LOCKED_REQUIREMENTS
+    else:
+        requirements = " ".join('"%s"' % r for r in REQUIREMENTS)
     return (
         "%s\n\n"
         "Build log: %s\n"
@@ -200,19 +212,113 @@ def _build_venv():
                 "Something is holding it open." % VENV_DIR
             )
     subprocess.check_call([sys.executable, "-m", "venv", str(VENV_DIR)])
-    subprocess.check_call(
-        [str(VENV_DIR / "Scripts" / "pip.exe"), "install", "--quiet"] + REQUIREMENTS
-    )
+    pip = [str(VENV_DIR / "Scripts" / "pip.exe"), "install", "--quiet"]
+    installed = False
+    if _locked_text():
+        # Hashes in the file put pip in hash-checking mode for every package.
+        try:
+            subprocess.check_call(pip + ["-r", str(LOCKED_REQUIREMENTS)])
+            installed = True
+        except subprocess.CalledProcessError as exc:
+            print("locked install failed (%s); falling back to %s" % (exc, REQUIREMENTS))
+    if not installed:
+        subprocess.check_call(pip + REQUIREMENTS)
     MARKER.write_text(_marker_payload(), encoding="utf-8")
     _prune_old_venvs()
 
 
+def _venvs_in_use():
+    """Names of the venvs under VENVS_DIR a running process was started from.
+
+    A venv's Scripts\\python.exe stays alive as long as the server it started,
+    so a running server shows up here. None when the process list cannot be
+    read: then nothing counts as unused.
+    """
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+    try:
+        psapi, kernel32 = ctypes.WinDLL("psapi"), ctypes.WinDLL("kernel32")
+        pids = (wintypes.DWORD * 4096)()
+        needed = wintypes.DWORD()
+        if not psapi.EnumProcesses(pids, ctypes.sizeof(pids), ctypes.byref(needed)):
+            return None
+        def long_form(path):
+            # A process reports its image path in the form it was started
+            # with, and the folder may be given in either: compare the long
+            # forms of both, not 8.3 short names (C:\Users\SIBOVA~1\...)
+            buf = ctypes.create_unicode_buffer(32768)
+            n = kernel32.GetLongPathNameW(path, buf, len(buf))
+            return os.path.normcase(buf.value if 0 < n < len(buf) else path)
+
+        root = long_form(str(VENVS_DIR)) + os.sep
+        names = set()
+        for pid in pids[:needed.value // ctypes.sizeof(wintypes.DWORD)]:
+            handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                continue
+            try:
+                buf = ctypes.create_unicode_buffer(32768)
+                size = wintypes.DWORD(len(buf))
+                if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                    path = long_form(buf.value)
+                    if path.startswith(root):
+                        names.add(path[len(root):].split(os.sep)[0])
+            finally:
+                kernel32.CloseHandle(handle)
+        return names
+    except (OSError, AttributeError):
+        return None
+
+
 def _prune_old_venvs():
-    # Venvs keyed to an older requirement list or interpreter. Best effort: one
-    # still in use by a running server has locked files and simply stays.
+    # Venvs keyed to another requirement list or interpreter. Deleting one a
+    # server still runs from removes every file that is not locked, and the
+    # server then fails on whatever it imports next (a screenshot's PNG
+    # encoder, say); its next launch cannot rebuild it either, as the locked
+    # files stay. So a venv is kept while a process runs from it, while
+    # another builder is building it, and for KEEP_UNUSED_DAYS after its
+    # last launch: two clients may launch with different interpreters (Claude
+    # Desktop and Claude Code, or "py" with and without PY_PYTHON), and each
+    # keeps its venv instead of rebuilding it every time the other ran.
+    in_use = _venvs_in_use()
+    if in_use is None:
+        return
+    cutoff = time.time() - KEEP_UNUSED_DAYS * 86400
     for child in VENVS_DIR.iterdir():
-        if child.is_dir() and child != VENV_DIR:
+        if not child.is_dir() or child == VENV_DIR:
+            continue
+        if child.name.endswith(".trash"):
             shutil.rmtree(child, ignore_errors=True)
+            continue
+        if child.name in in_use or _builder_alive(child.name):
+            continue
+        try:
+            last_used = (child / MARKER.name).stat().st_mtime
+        except OSError:
+            last_used = 0  # never finished building
+        if last_used > cutoff:
+            continue
+        # Renamed first, so a delete that stops half way never leaves a
+        # broken venv under a name a launcher would pick up
+        trash = child.with_name(child.name + ".trash")
+        try:
+            os.rename(child, trash)
+        except OSError:
+            continue
+        shutil.rmtree(trash, ignore_errors=True)
+
+
+def _builder_alive(venv_name):
+    """True while a builder holds the lock for that venv."""
+    lock = VENVS_DIR / (venv_name + ".lock")
+    try:
+        age = time.time() - lock.stat().st_mtime
+        pid = int(lock.read_text(encoding="ascii").strip() or 0)
+    except (OSError, ValueError):
+        return False
+    return age < STALE_LOCK_SECONDS and _pid_alive(pid)
 
 
 def build_main():
@@ -270,8 +376,18 @@ def _build_log_tail(lines=12):
 
 # --- launcher ---------------------------------------------------------------
 
+def _mark_used():
+    # The marker's modification time is the venv's last launch, which keeps
+    # it from being pruned while it is in use (see _prune_old_venvs)
+    try:
+        os.utime(MARKER)
+    except OSError:
+        pass
+
+
 def ensure_venv():
     if venv_is_ready():
+        _mark_used()
         return str(PYTHON_EXE)
 
     if not _lock_is_live():
@@ -282,6 +398,7 @@ def ensure_venv():
     while time.time() - started < LAUNCH_WAIT_SECONDS:
         time.sleep(0.5)
         if venv_is_ready():
+            _mark_used()
             return str(PYTHON_EXE)
         if _lock_is_live():
             seen_builder = True
