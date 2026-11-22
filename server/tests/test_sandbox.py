@@ -787,7 +787,10 @@ class RollbackToolTest(unittest.TestCase):
         sandbox.record_run_end(self.sb.snapshot_dir("Sbx_1"),
                                [f"DOC STATE: open|{self.doc}", f"DOC AFTER: unsaved|{self.doc}"])
 
-    def rollback(self, running, replies=(), **kw):
+    def rollback(self, running, replies=(), sandbox_allowed=False, **kw):
+        """running: whether Altium runs, or an iterator of the answers to
+        each check. sandbox_allowed opens the gate that refuses the sandbox
+        while Altium runs (main._sandbox_refusal)."""
         mock, main = self.mock, self.main
         calls = []
 
@@ -797,7 +800,12 @@ class RollbackToolTest(unittest.TestCase):
 
         async def ensure_paths(need_script=True):
             return None
-        with mock.patch.object(type(main.altium_bridge), "_altium_running", staticmethod(lambda: running)), \
+        is_running = (lambda: running) if isinstance(running, bool) else (lambda: next(running))
+        refusal = (lambda *a, **k: None) if sandbox_allowed else main._sandbox_refusal
+        self.popen = mock.Mock(name="Popen")
+        with mock.patch.object(type(main.altium_bridge), "_altium_running", staticmethod(is_running)), \
+                mock.patch.object(main, "_sandbox_refusal", refusal), \
+                mock.patch.object(sandbox.subprocess, "Popen", self.popen), \
                 mock.patch.object(main.altium_bridge, "ensure_paths", ensure_paths), \
                 mock.patch.object(main, "altium_limit_problem", lambda: None), \
                 mock.patch.object(sandbox, "altium_hung", lambda: False), \
@@ -824,6 +832,27 @@ class RollbackToolTest(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(self.doc.read_bytes(), b"script saved this")
 
+    def test_refused_while_altium_runs_without_the_listener(self):
+        # FORK: with Altium running, the rollback would reach it on the command
+        # line, which can open a second Altium; nothing is restored or launched
+        result, calls = self.rollback(running=True, discard_unsaved=True)
+        self.assertFalse(result["success"])
+        self.assertIn("Altium Designer is running", result["error"])
+        self.assertIn("With Altium closed", result["error"])
+        self.assertEqual(calls, [])
+        self.popen.assert_not_called()
+        self.assertEqual(self.doc.read_bytes(), b"script saved this")
+
+    def test_refused_when_altium_starts_during_the_rollback(self):
+        # FORK: not running at the first check, running when the documents
+        # would be closed in it: checked again there, so still nothing launched
+        result, calls = self.rollback(running=iter([False, True, True]))
+        self.assertFalse(result["success"])
+        self.assertIn("Altium Designer is running", result["error"])
+        self.assertEqual(calls, [])
+        self.popen.assert_not_called()
+        self.assertEqual(self.doc.read_bytes(), b"script saved this")
+
     def test_altium_not_running_still_checks_the_disk(self):
         self.doc.write_bytes(b"user saved this")
         result, calls = self.rollback(running=False)
@@ -831,8 +860,13 @@ class RollbackToolTest(unittest.TestCase):
         self.assertEqual(result["changed_since_run"], [str(self.doc)])
         self.assertEqual(self.doc.read_bytes(), b"user saved this")
 
+    # FORK: the tests below describe the rollback steps inside a running
+    # Altium. The sandbox is refused while Altium runs (the two tests above),
+    # so they open that gate, to keep those steps covered for when the
+    # sandbox gets a path that cannot open a second Altium.
+
     def test_unsaved_at_rollback_refused_even_if_the_run_left_it_so(self):
-        result, calls = self.rollback(running=True, replies=[f"unsaved|{self.doc}\n"])
+        result, calls = self.rollback(running=True, sandbox_allowed=True, replies=[f"unsaved|{self.doc}\n"])
         self.assertFalse(result["success"])
         self.assertEqual(result["unsaved_now"], [str(self.doc)])
         self.assertEqual(result["left_unsaved_by_run"], [str(self.doc)])
@@ -840,7 +874,7 @@ class RollbackToolTest(unittest.TestCase):
         self.assertEqual(self.doc.read_bytes(), b"script saved this")
 
     def test_unsaved_restored_with_discard_unsaved(self):
-        result, calls = self.rollback(running=True, discard_unsaved=True,
+        result, calls = self.rollback(running=True, sandbox_allowed=True, discard_unsaved=True,
                                       replies=[f"unsaved|{self.doc}\n", f"open|{self.doc}\n", "reopened"])
         self.assertTrue(result["success"], result)
         self.assertEqual(result["reopened"], [str(self.doc)])
@@ -851,11 +885,59 @@ class RollbackToolTest(unittest.TestCase):
         # The snapshot was given another spelling of the path; Altium's own
         # name for the document is the one it is reopened under
         shown = str(self.doc).upper()
-        result, calls = self.rollback(running=True, discard_unsaved=True,
+        result, calls = self.rollback(running=True, sandbox_allowed=True, discard_unsaved=True,
                                       replies=[f"unsaved|{self.doc}\n", f"open|{self.doc}|{shown}\n", "reopened"])
         self.assertTrue(result["success"], result)
         self.assertEqual(result["reopened"], [shown])
         self.assertIn(shown.replace("'", "''"), calls[2])
+
+
+class RunScriptToolTest(unittest.TestCase):
+    """FORK: main.run_altium_script reaches Altium only on its command line,
+    so it is refused in every state and never launches X2.EXE."""
+
+    def test_refused_in_every_state(self):
+        import asyncio
+        import contextlib
+        import json
+        import tempfile
+        from unittest import mock
+        import main
+
+        async def ensure_paths(need_script=True):
+            return None
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        folder = Path(tmp.name)
+        for live, running in ((True, True), (False, True), (False, False)):
+            popen, answer = mock.Mock(name="Popen"), mock.Mock(name="answer_dialog")
+            with self.subTest(listener_live=live, altium_running=running), contextlib.ExitStack() as stack:
+                for target, name, value in (
+                        (main, "listener_is_live", lambda: live),
+                        (main.AltiumBridge, "_altium_running", staticmethod(lambda: running)),
+                        (sandbox.subprocess, "Popen", popen),
+                        # Should the refusal ever regress, the run must still
+                        # not reach this machine's Altium, its dialogs or the
+                        # shared exchange folder, and must fail fast
+                        (sandbox, "answer_dialog", answer),
+                        (sandbox, "altium_dialogs", lambda: []),
+                        (sandbox, "altium_hung", lambda: False),
+                        (main, "_guard_foreground", mock.Mock(name="_guard_foreground")),
+                        (main, "altium_limit_problem", lambda: None),
+                        (main.altium_bridge, "ensure_paths", ensure_paths),
+                        (main, "SANDBOX_RUNS", folder / "runs"),
+                        (main, "SANDBOX_DIALOGS", folder / "dialogs"),
+                        (main, "SANDBOX_SNAPSHOTS", folder / "snapshots"),
+                        (main, "STUCK_MARKER", folder / "stuck.txt")):
+                    stack.enter_context(mock.patch.object(target, name, value))
+                out = json.loads(asyncio.run(main.run_altium_script(None, "ResultText := 'x';",
+                                                                    timeout_seconds=1)))
+                self.assertFalse(out["success"])
+                self.assertFalse(out["executor_wedged"])
+                self.assertIn("Script Editor", out["error"])
+                popen.assert_not_called()
+                answer.assert_not_called()
+                self.assertFalse((folder / "runs").exists())
 
 
 if __name__ == "__main__":

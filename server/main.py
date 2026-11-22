@@ -115,10 +115,11 @@ PROGRESS_FILE = EXCHANGE_DIR / "progress.txt"
 # FORK: heartbeat of the in-Altium listener (AltiumScript/McpListener.pas),
 # rewritten on every poll tick. While it is fresh, requests are picked up by a
 # script already running inside the user's Altium and this server launches
-# nothing. The command line (run_altium_script below) is not used then: on the
-# machine this fork is developed on it starts a SECOND, project-less Altium
-# that takes another license seat instead of reaching the running one
-# (measured 2026-09-22/23; why is unresolved). See the fork's CLAUDE.md.
+# nothing. The command line (run_altium_script below) is not used then, nor
+# while it is stale (listener_silent_error): on the machine this fork is
+# developed on it starts a SECOND, project-less Altium that takes another
+# license seat instead of reaching the running one (measured 2026-09-22/23;
+# why is unresolved). See the fork's CLAUDE.md.
 LISTENER_FILE = EXCHANGE_DIR / "listener.json"
 LISTENER_STALE_SECONDS = 15
 
@@ -147,6 +148,46 @@ def listener_is_live() -> bool:
         # Fresh but unreadable: the listener is mid-write. The mtime is the
         # authority; do not invent a fault from a torn read.
         return True
+
+
+def listener_silent_error(command: str) -> str:
+    """FORK: refusal of a command while Altium runs but its listener is silent.
+
+    Nothing goes to Altium's command line then: on this fork's machine that
+    opens a second, project-less Altium which takes a license seat instead of
+    reaching the running one (measured 2026-09-22/23). On 2026-11-22 a
+    follow-up command inside one tool call did exactly that: query_objects
+    paused the bridge script in Altium's debugger, the heartbeat went stale,
+    and query_restore went out on the command line.
+    """
+    return (f"Not running '{command}': Altium Designer is running, but the in-Altium listener "
+            f"is not answering (its heartbeat {LISTENER_FILE} is missing, stale or says "
+            f"stopped). Nothing was sent: this server does not fall back to Altium's command "
+            f"line, which can open a second, project-less Altium instead of reaching the "
+            f"running one. If a script is paused in Altium's debugger (a runtime error "
+            f"silences the listener without a dialog), press Ctrl+F3 in Altium. Then File > "
+            f"Run Script..., expand Altium_API > McpListener.pas, select StartMcpListener, "
+            f"click Run, and leave the listener window open: it must read \"Listening\".")
+
+
+def _withdraw_request(request_id: str) -> bool:
+    """FORK: delete request.json if it still holds request_id's request.
+
+    For a request no bridge script took: left behind, a listener started
+    later would run it out of context. Bound to request_id, so a request
+    another server wrote after this one gave up is never touched.
+    """
+    try:
+        held = json.loads(REQUEST_FILE.read_text(), strict=False).get("request_id")
+    except (OSError, ValueError, AttributeError):
+        return False  # gone (taken by the bridge script), held open, or not ours to judge
+    if held != request_id:
+        return False
+    try:
+        REQUEST_FILE.unlink()
+    except OSError:
+        return False  # taken by the bridge script between the read and the unlink
+    return True
 
 # Copies of command results (design data) that older bridge scripts left in
 # this folder, which every account on the machine can read. Nothing reads
@@ -568,6 +609,11 @@ class AltiumBridge:
                               leave_altium_in_front: bool = False) -> Dict[str, Any]:
         """Execute a command in Altium via the bridge script.
 
+        FORK: every command needs the live in-Altium listener: nothing is
+        sent on Altium's command line, neither to cold-start Altium nor to a
+        running one (which opens a second Altium on this fork's machine), see
+        listener_silent_error.
+
         watcher, if given, runs beside the command while it holds the locks
         (to answer dialogs the command raises, say), from the moment the
         bridge script has picked the request up: a box Altium shows before
@@ -679,6 +725,14 @@ class AltiumBridge:
             logger.warning("Not sending -REditScript:Stop: the command went through the "
                            "in-Altium listener (Ctrl+F3 in Altium stops a paused script)")
             return
+        # FORK: nor while any Altium runs, whatever path the command took: the
+        # command line can open a second Altium instead of reaching it.
+        # _execute_command_locked refuses every command without the listener,
+        # so this is not reached; it keeps the rule at the launch itself.
+        if self._altium_running():
+            logger.error("Not sending -REditScript:Stop: an Altium is running, and the command "
+                         "line can open a second one (Ctrl+F3 in Altium stops a paused script)")
+            return
         _dismiss_altium_dialogs(message_boxes_only=True)
         await asyncio.sleep(1)
         logger.warning("Sending -REditScript:Stop to Altium to unblock the script executor")
@@ -715,6 +769,7 @@ class AltiumBridge:
                                       picked_up: Optional[asyncio.Event] = None) -> Dict[str, Any]:
         """Run one command with the locks held. picked_up, if given, is set
         once the bridge script has picked the request up."""
+        request_id = None
         try:
             problem = altium_limit_problem()
             if problem:
@@ -734,15 +789,21 @@ class AltiumBridge:
             request_id = uuid.uuid4().hex[:12]
 
             # FORK: pick the delivery path before writing anything. With the
-            # listener live nothing is launched. Without it the command line
-            # is used, but never to cold-start Altium: a fresh instance has no
-            # project loaded and takes a license seat.
+            # listener live nothing is launched. Without it nothing is sent:
+            # not to cold-start Altium (a fresh instance has no project loaded
+            # and takes a license seat), and not on the command line to a
+            # running Altium either (see listener_silent_error). Checked for
+            # every command, so a follow-up a tool sends after a failed one
+            # (query_restore, say) is held to it too.
             self._via_listener = listener_is_live()
             if not self._via_listener and not self._altium_running():
                 return {"success": False,
                         "error": f"Not running '{command}': Altium Designer is not running. Open "
                                  f"it with the target project and start the listener - this "
                                  f"server does not launch Altium. {START_LISTENER_HINT}"}
+            if not self._via_listener:
+                logger.error(f"Not sending '{command}': Altium runs but the listener is silent")
+                return {"success": False, "error": listener_silent_error(command)}
 
             # FORK: written atomically, because the listener polls for this
             # path twice a second and could otherwise read a partial file
@@ -905,7 +966,14 @@ class AltiumBridge:
         except Exception as e:
             logger.error(f"Error executing command: {e}")
             return {"success": False, "error": str(e)}
-    
+        finally:
+            # FORK: a request no bridge script took is withdrawn on every way
+            # out - a failed launch, an error, a cancelled call, a timeout -
+            # so a listener started later cannot run it out of context. Taken
+            # requests are already gone (the script consumes request.json).
+            if request_id is not None and _withdraw_request(request_id):
+                logger.warning(f"Removed request {request_id} ('{command}'): no bridge script took it")
+
     @staticmethod
     def _resolve_msix_path(virtual_path: str) -> str:
         """Resolve an MSIX-virtualized path to the real filesystem path.
@@ -940,7 +1008,17 @@ class AltiumBridge:
         return virtual_path
 
     async def run_altium_script(self) -> bool:
-        """Run the Altium bridge script"""
+        """Run the Altium bridge script
+
+        FORK: refused while any Altium runs: the command line can open a
+        second Altium instead of reaching it. _execute_command_locked refuses
+        every command without the listener before writing a request, so this
+        is not reached; it keeps the rule at the launch itself.
+        """
+        if self._altium_running():
+            logger.error("Not launching X2.EXE: an Altium is running, and the command line can "
+                         "open a second one instead of reaching it")
+            return False
         if not os.path.exists(self.config.altium_exe_path):
             logger.error(f"Altium executable not found at: {self.config.altium_exe_path}")
             return False
@@ -1766,24 +1844,34 @@ def _dismiss_altium_dialogs(message_boxes_only: bool = False):
     return found
 
 
-def _sandbox_refusal(tool: str, needs_altium: bool = True) -> Optional[str]:
+SANDBOX_INSTEAD = "Run the snippet from Altium's own Script Editor instead."
+ROLLBACK_INSTEAD = "With Altium closed, the snapshotted files are restored on disk without it."
+
+
+def _sandbox_refusal(tool: str, needs_altium: bool = True, instead: str = SANDBOX_INSTEAD) -> Optional[str]:
     """FORK: why a sandbox tool must not run now, or None.
 
     The sandbox reaches Altium only on the command line, never through the
     in-Altium listener, and on this fork's machine the command line opens a
     second Altium (see LISTENER_FILE). So it is refused while the listener
-    runs, and, for a tool that needs Altium (needs_altium), when no Altium is
-    running (it would cold-start one). rollback_altium_script passes
-    needs_altium=False: without Altium it only restores files on disk.
+    runs, and while any Altium runs without it (listener_silent_error), and,
+    for a tool that needs Altium (needs_altium), when no Altium is running
+    (it would cold-start one) - such a tool is therefore always refused.
+    rollback_altium_script passes needs_altium=False: without Altium it only
+    restores files on disk. instead is the advice that ends each refusal.
     """
     if listener_is_live():
         return (f"{tool} is unavailable while the in-Altium listener is running: the sandbox "
                 f"is started on Altium's command line, which can open a second Altium instead "
-                f"of reaching this one. Run the snippet from Altium's own Script Editor, or "
-                f"stop the listener first.")
-    if needs_altium and not AltiumBridge._altium_running():
-        return (f"{tool}: Altium Designer is not running. Open it with the target project "
-                f"first - this server does not launch Altium.")
+                f"of reaching this one. {instead}")
+    if AltiumBridge._altium_running():
+        return (f"{tool} is unavailable while Altium Designer is running: the sandbox is started "
+                f"on Altium's command line, which can open a second, project-less Altium instead "
+                f"of reaching the running one. Nothing was run. {instead}")
+    if needs_altium:
+        return (f"{tool}: Altium Designer is not running, and this server does not launch it; "
+                f"with Altium running the sandbox is refused as well, because it reaches "
+                f"Altium only on the command line. {instead}")
     return None
 
 
@@ -2226,7 +2314,7 @@ async def rollback_altium_script(ctx: Context, run_id: str, discard_unsaved: boo
     Returns:
         str: JSON with the restored documents and which were reopened.
     """
-    refusal = _sandbox_refusal("rollback_altium_script", needs_altium=False)
+    refusal = _sandbox_refusal("rollback_altium_script", needs_altium=False, instead=ROLLBACK_INSTEAD)
     if refusal:
         return json.dumps({"success": False, "error": refusal})
     sb = _sandbox()
@@ -2254,6 +2342,12 @@ async def rollback_altium_script(ctx: Context, run_id: str, discard_unsaved: boo
         return json.dumps({"success": not failed, "restored": restored, "failed": failed,
                            "reopened": [], "note": "Altium was not running; the files were restored "
                                                    "on disk without starting it."}, indent=2)
+    # FORK: from here on the rollback reaches Altium on its command line
+    # (run_quick). Altium may have started since the check at the top, so
+    # check again; needs_altium, so a cold start is refused as well.
+    refusal = _sandbox_refusal("rollback_altium_script", instead=ROLLBACK_INSTEAD)
+    if refusal:
+        return json.dumps({"success": False, "error": refusal})
     unsaved = [e["path"] for e in entries if e.get("state_before") == "unsaved"]
     if unsaved and not discard_unsaved:
         return json.dumps({
@@ -8599,14 +8693,16 @@ async def get_server_status(ctx: Context) -> str:
     listener = listener_is_live()
     status["altium_running"] = AltiumBridge._altium_running()
     status["listener_live"] = listener
-    status["dispatch"] = "listener" if listener else "command-line"
+    # FORK: "none" - without the listener every command is refused (see
+    # listener_silent_error); nothing goes to Altium's command line
+    status["dispatch"] = "listener" if listener else "none"
     if not listener:
         status["dispatch_note"] = (
-            "The listener is not running, so commands would be handed to Altium on the "
-            "command line. On the machine this fork is developed on that opens a SECOND "
-            "Altium instead of reaching the one you have open - with no project loaded and "
-            "taking another license seat - and why is not understood. Start the listener "
-            "before calling any tool: " + START_LISTENER_HINT)
+            "The listener is not running, so every command is refused. This server sends "
+            "nothing on Altium's command line: on the machine this fork is developed on that "
+            "opens a SECOND Altium instead of reaching the one you have open - with no project "
+            "loaded and taking another license seat - and why is not understood. Nor does it "
+            "start Altium. Start the listener before calling any tool: " + START_LISTENER_HINT)
 
     return json.dumps(status, indent=2)
 
